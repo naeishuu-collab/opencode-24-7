@@ -1,0 +1,110 @@
+name: agent-job
+
+# Manual, self-hosted autonomous job: this repository's own Actions minutes run
+# an agent that develops this repository (see docs/PHASE0-AUDIT.md, ToS section).
+# contents: read on purpose - the agent can propose a diff, never push.
+on:
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: Task for the agent
+        required: true
+        type: string
+      model:
+        description: provider/model (free models only unless you accept the cost)
+        required: false
+        default: opencode/deepseek-v4.1-flash-free
+        type: string
+      verify_cmd:
+        description: shell command that must exit 0, e.g. npm test
+        required: false
+        default: ""
+        type: string
+      timeout_sec:
+        description: wall-clock limit per attempt
+        required: false
+        default: "1800"
+        type: string
+      max_attempts:
+        description: retries for transient provider errors (1-3)
+        required: false
+        default: "1"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-job-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      JOB_PROMPT: ${{ inputs.prompt }}
+      JOB_MODEL: ${{ inputs.model }}
+      JOB_VERIFY: ${{ inputs.verify_cmd }}
+      JOB_TIMEOUT: ${{ inputs.timeout_sec }}
+      JOB_ATTEMPTS: ${{ inputs.max_attempts }}
+      RUN_BASE: ${{ runner.temp }}/oc24-runs
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install opencode CLI (policies need 2.0.32 or newer)
+        run: npm i -g @opencode/cli@2.0.32
+
+      - name: Import opencode credentials
+        env:
+          # contents of `opencode auth export`; optional if the chosen model needs no auth
+          OPENCODE_AUTH_JSON: ${{ secrets.OPENCODE_AUTH_JSON }}
+        run: |
+          if [ -n "$OPENCODE_AUTH_JSON" ]; then
+            printf '%s' "$OPENCODE_AUTH_JSON" | opencode auth import
+          else
+            echo "OPENCODE_AUTH_JSON secret not set; continuing without imported credentials"
+          fi
+
+      - name: Run agent job
+        id: agent
+        run: |
+          extra=()
+          if [ -n "$JOB_VERIFY" ]; then extra+=(--verify-cmd "$JOB_VERIFY"); fi
+          node runner/run-job.mjs \
+            --workspace "$GITHUB_WORKSPACE" \
+            --run-base "$RUN_BASE" \
+            --model "$JOB_MODEL" \
+            --prompt "$JOB_PROMPT" \
+            --timeout-sec "$JOB_TIMEOUT" \
+            --max-attempts "$JOB_ATTEMPTS" \
+            --max-cost-usd 0 \
+            "${extra[@]}"
+          code=$?
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Job summary
+        if: always()
+        run: |
+          for f in "$RUN_BASE"/*/summary.md; do
+            [ -f "$f" ] && cat "$f" >> "$GITHUB_STEP_SUMMARY"
+          done
+          echo "exit_code=${{ steps.agent.outputs.exit_code }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload job artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oc24-job-${{ github.run_id }}
+          path: ${{ runner.temp }}/oc24-runs
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Fail when the job did not succeed
+        if: steps.agent.outputs.exit_code != '0'
+        run: exit 1

@@ -1,0 +1,18 @@
+[
+  { "action": "tool.use", "resource": "shell:git push*", "effect": "deny" },
+  { "action": "tool.use", "resource": "shell:git remote set-url*", "effect": "deny" },
+  { "action": "tool.use", "resource": "shell:sudo *", "effect": "deny" },
+  { "action": "tool.use", "resource": "shell:shutdown *", "effect": "deny" },
+  { "action": "tool.use", "resource": "shell:reboot *", "effect": "deny" },
+  { "action": "tool.use", "resource": "shell:mkfs*", "effect": "deny" },
+  { "action": "tool.use", "resource": "shell:diskpart*", "effect": "deny" },
+  { "action": "tool.use", "resource": "read:*.env", "effect": "deny" },
+  { "action": "tool.use", "resource": "read:*.env.*", "effect": "deny" },
+  { "action": "tool.use", "resource": "read:*id_rsa*", "effect": "deny" },
+  { "action": "tool.use", "resource": "read:*id_ed25519*", "effect": "deny" },
+  { "action": "tool.use", "resource": "read:*/.ssh/*", "effect": "deny" },
+  { "action": "tool.use", "resource": "read:*.aws/credentials*", "effect": "deny" },
+  { "action": "tool.use", "resource": "external_directory:*", "effect": "deny" },
+  { "action": "tool.use", "resource": "webfetch:*", "effect": "deny" },
+  { "action": "tool.use", "resource": "websearch:*", "effect": "deny" }
+]
