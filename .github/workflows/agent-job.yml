@@ -3,6 +3,10 @@ name: agent-job
 # Manual, self-hosted autonomous job: this repository's own Actions minutes run
 # an agent that develops this repository (see docs/PHASE0-AUDIT.md, ToS section).
 # contents: read on purpose - the agent can propose a diff, never push.
+#
+# The run name carries the controller's marker so the controller can match a
+# dispatch (workflow_dispatch returns no run id) to this run exactly.
+run-name: "agent-job ${{ inputs.job_marker }}"
 on:
   workflow_dispatch:
     inputs:
@@ -29,6 +33,26 @@ on:
         description: retries for transient provider errors (1-3)
         required: false
         default: "1"
+        type: string
+      job_marker:
+        description: controller marker echoed into the run name (set by the controller)
+        required: false
+        default: ""
+        type: string
+      controller_url:
+        description: controller base URL for advisory reports (optional)
+        required: false
+        default: ""
+        type: string
+      attempt_id:
+        description: controller attempt id (optional)
+        required: false
+        default: ""
+        type: string
+      attempt_token:
+        description: attempt token; advisory only and visible in the run inputs
+        required: false
+        default: ""
         type: string
 
 permissions:
@@ -97,9 +121,18 @@ jobs:
         id: agent
         env:
           RUN_BASE: ${{ runner.temp }}/oc24-runs
+          # Advisory reporting to the controller; the attempt token is not a
+          # secret (it only authorises a report for one attempt, and the
+          # controller's verdict comes from the uploaded artifact).
+          CONTROLLER_URL: ${{ inputs.controller_url }}
+          ATTEMPT_ID: ${{ inputs.attempt_id }}
+          ATTEMPT_TOKEN: ${{ inputs.attempt_token }}
         run: |
           extra=()
           if [ -n "$JOB_VERIFY" ]; then extra+=(--verify-cmd "$JOB_VERIFY"); fi
+          if [ -n "$CONTROLLER_URL" ] && [ -n "$ATTEMPT_ID" ] && [ -n "$ATTEMPT_TOKEN" ]; then
+            extra+=(--report-url "$CONTROLLER_URL" --attempt-id "$ATTEMPT_ID" --report-token "$ATTEMPT_TOKEN")
+          fi
           # set -e is active: capture the code instead of aborting the step
           code=0
           node runner/run-job.mjs \
@@ -119,7 +152,9 @@ jobs:
         if: always()
         env:
           RUN_BASE: ${{ runner.temp }}/oc24-runs
+          JOB_MARKER: ${{ inputs.job_marker }}
         run: |
+          echo "controller marker: ${JOB_MARKER:-none}" >> "$GITHUB_STEP_SUMMARY"
           for f in "$RUN_BASE"/*/summary.md; do
             [ -f "$f" ] && cat "$f" >> "$GITHUB_STEP_SUMMARY"
           done

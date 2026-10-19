@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { genJobId, git, makeRedactor, ensureDir, writeJson, childEnv } from "./lib/util.mjs";
+import { createReporter } from "./lib/report.mjs";
 import {
   MIN_OPENCODE_VERSION,
   buildAgentArgs,
@@ -60,6 +61,9 @@ options:
   --allow-unlisted-model          allow a model outside the verified-free allowlist;
                                   success then additionally requires an observed cost report
   --require-cost-report           fail closed (exit 20) when the provider never reports cost
+  --report-url <url>              controller base URL for advisory heartbeats/results
+  --attempt-id <id>               controller attempt id (with --report-url)
+  --report-token <token>          attempt token for the report endpoint (advisory auth)
   --skip-version-check            do not enforce the minimum opencode version (unsafe)
   --help
 
@@ -71,6 +75,7 @@ function parseArgs(argv) {
     "workspace", "prompt", "prompt-file", "model", "agent", "timeout-sec", "max-tokens",
     "max-cost-usd", "max-steps", "max-attempts", "verify-cmd", "verify-timeout-sec",
     "run-base", "job-id", "opencode-bin", "min-opencode-version",
+    "report-url", "attempt-id", "report-token",
   ]);
   const flags = new Set(["allow-web", "allow-external-dir", "allow-unlisted-model", "require-cost-report", "skip-version-check", "help"]);
   const cfg = { values: {}, flags: new Set() };
@@ -558,13 +563,23 @@ async function main() {
   const runDir = path.join(runBase, jobId);
   ensureDir(path.join(runDir, "logs"));
 
-  const redact = makeRedactor(process.env);
+  const redact = makeRedactor(process.env, [cfg.values["report-token"]]);
   const runnerLogPath = path.join(runDir, "logs", "runner.log");
   const log = (msg) => {
     const line = redact.redact(`[${new Date().toISOString()}] ${msg}`);
     fs.appendFileSync(runnerLogPath, line + "\n");
     console.error(line);
   };
+
+  const reporter = createReporter({
+    url: cfg.values["report-url"],
+    attemptId: cfg.values["attempt-id"],
+    token: cfg.values["report-token"],
+    log,
+  });
+  if (reporter.enabled) log(`advisory reporting to ${reporter.endpoint}`);
+  await reporter.send({ phase: "starting", message: "runner started" });
+  reporter.startHeartbeat("running");
 
   const result = buildSkeleton(cfg, jobId, workspace, runDir);
   log(`job ${jobId} starting; workspace=${workspace}`);
@@ -588,6 +603,7 @@ async function main() {
   writeJson(path.join(runDir, "job.json"), result);
   writeSummaryMd(result, runDir, redact);
   log(`finished: status=${result.status} exit=${result.exitCode} duration=${result.timing.durationMs}ms`);
+  await reporter.finish(result);
 
   console.log(
     `RESULT ${JSON.stringify({

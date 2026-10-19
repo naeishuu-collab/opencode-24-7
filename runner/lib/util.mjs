@@ -36,10 +36,11 @@ export function execFor(bin) {
     : { cmd: bin, preArgs: [] };
 }
 
-export function makeRedactor(env) {
+export function makeRedactor(env, extraSecrets = []) {
   const secrets = Object.entries(env)
     .filter(([k, v]) => typeof v === "string" && v.length >= 6 && /(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH)/i.test(k))
     .map(([, v]) => v)
+    .concat(extraSecrets.filter((v) => typeof v === "string" && v.length >= 6))
     .sort((a, b) => b.length - a.length);
   const patterns = [
     /sk-[A-Za-z0-9_-]{20,}/g,
