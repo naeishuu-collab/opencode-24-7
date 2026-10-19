@@ -159,7 +159,11 @@ export function runAttempt({ bin, args, cwd, env, budgets, onLine, registerChild
     child.on("error", (err) => {
       spawnError = err;
     });
-    child.on("exit", (code, signal) => {
+    // "close" (not "exit") fires after the stdio pipes are drained, so no event
+    // line can be lost. Resolving on "exit" made the runner drop the tail of the
+    // output whenever the child wrote and exited quickly (seen on a loaded
+    // windows-latest runner: a nocost run with events was read as "no events").
+    child.on("close", (code, signal) => {
       clearTimeout(timer);
       rl.close();
       registerChild?.(null);

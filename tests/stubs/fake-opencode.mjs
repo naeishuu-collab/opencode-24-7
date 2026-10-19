@@ -7,13 +7,14 @@ import os from "node:os";
 import path from "node:path";
 
 if (process.argv.includes("--version")) {
-  console.log(`opencode v${process.env.OC24_STUB_VERSION ?? "2.9.9"}`);
+  // synchronous: process.exit() can truncate pending pipe writes on Windows
+  fs.writeSync(1, `opencode v${process.env.OC24_STUB_VERSION ?? "2.9.9"}\n`);
   process.exit(0);
 }
 
 const mode = process.env.OC24_STUB_MODE ?? "ok";
 const sid = "ses_stub00000000000000000000";
-const out = (o) => process.stdout.write(JSON.stringify(o) + "\n");
+const out = (o) => fs.writeSync(1, JSON.stringify(o) + "\n");
 const base = (type, part) => ({ type, timestamp: Date.now(), sessionID: sid, part });
 const stepStart = () => out(base("step_start", { type: "step-start" }));
 const stepFinish = ({ tokens = {}, cost } = {}) => {
@@ -116,6 +117,13 @@ switch (mode) {
     text("stub nocost");
     process.exit(0);
     break;
+  case "burst":
+    // large burst, then an immediate exit: every line must still be read
+    for (let i = 0; i < 500; i++) {
+      stepFinish({ tokens: { input: 1, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }, cost: 0 });
+    }
+    process.exit(0);
+    break;
   case "leaky-file": {
     const secret = process.env.OC24_TEST_SECRET ?? "no-secret";
     stepStart();
@@ -130,7 +138,7 @@ switch (mode) {
     const secret = process.env.OC24_TEST_SECRET ?? "no-secret";
     stepStart();
     stepFinish({ tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 0, write: 0 } }, cost: 0 });
-    process.stderr.write(`stderr leaks ${secret}\n`);
+    fs.writeSync(2, `stderr leaks ${secret}\n`);
     text(`the secret is ${secret} ok`);
     process.exit(0);
     break;

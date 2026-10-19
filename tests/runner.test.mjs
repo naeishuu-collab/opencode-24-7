@@ -332,6 +332,17 @@ test("verify: timeout is a verification failure", () => {
   assert.equal(job.verification.timedOut, true);
 });
 
+test("events: every line of a burst survives an immediate exit", () => {
+  const dir = makeRepo();
+  // The runner used to resolve on "exit" (closing readline before the stdio
+  // pipes drained) and the stub used to write asynchronously before exit():
+  // either loss showed up on a loaded runner as "produced no events".
+  const { code, job } = runRunner(dir, [...PROMPT, "--max-steps", "1000"], { OC24_STUB_MODE: "burst" });
+  assert.equal(code, 0);
+  assert.equal(job.usage.steps, 500);
+  assert.equal(job.usage.tokens.input, 500);
+});
+
 test("verify: node test markers of the caller are not inherited", () => {
   const dir = makeRepo();
   // Seen in the first cloud run: the verify command inherited NODE_TEST_CONTEXT
