@@ -141,6 +141,8 @@ Every real-model run used the free tier only (`--max-cost-usd 0` and
 | `agent-job` 39248464928, 39250729311 | self-hosted job: the agent fixed the fixture bug, exactly 1 file changed, ~24k tokens, $0, verification really ran and passed; the log shows the workflow token has `"push":false`; artifact `oc24-job-<id>` uploaded after a clean scan |
 | `agent-job` 39248686377 | failure propagation: `--verify-cmd false` -> exit 15 (`verification command exited with code 1`), the run fails, and the artifacts are still uploaded as evidence |
 | `integration` 39250712404 | final revision: both real-model cases green again (fix verified, `git push` denied, `$0`, 23,686 and 17,238 tokens) with the fail-closed scan guard in place |
+| `ci` 39262948350 | Phase 2D at `117594b`: 76 tests green on ubuntu-24.04 and windows-latest (controller suites included) + `node --check controller/worker.mjs` |
+| `agent-job` 39263425059 | **controller-dispatched** (`workflow_dispatch`, 72 s end to end): local controller tick -> dispatch -> run matched by marker -> artifact download -> independent verification -> `succeeded`, 30,836 tokens, $0, `npm test` exit 0, no commit |
 
 The Linux verification found a real bug: opencode resolves its project root from
 the `PWD` environment variable on POSIX, so a forwarded `PWD` made the agent

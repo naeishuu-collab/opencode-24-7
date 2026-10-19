@@ -185,13 +185,25 @@ Executed:
 * `tests/report.test.mjs` — 2 tests: a real runner process reporting to a real
   controller server (metrics stored as `runner-report`, job state unchanged), and
   a dead report target that never fails the job and never leaks the token.
+* **Real dispatch E2E (2026-10-19, public repo, free tier only).** A local
+  controller (tick loop on, no manual calls) created a job through the HTTP API.
+  Its own tick dispatched `agent-job.yml` at `117594b` via `workflow_dispatch`
+  (run [`39263425059`](https://github.com/naeishuu-collab/opencode-24-7/actions/runs/39263425059)),
+  matched the run by marker through `run-name`, downloaded the artifact
+  (`oc24-job-39263425059`, 9,609 bytes) and verified the runner's `job.json`
+  independently: model allowlisted, `costUsd 0`, 5 steps, 30,836 tokens,
+  `npm test` exit 0, `commitBefore == commitAfter` (no commit), one changed path.
+  The job reached `succeeded` 72 s after creation, with `artifacts: 1`,
+  `event: workflow_dispatch` and `head_sha: 117594b` confirmed through the GitHub
+  API; the dashboard showed the same state from `/api/stats`.
 
 ### Unverified
 
 * **Cloudflare deployment.** No CF account: the worker entry, D1 binding, cron
   trigger and the 10 ms CPU/request budget are untested in the real runtime. The
   shared code path is tested through the D1 call shape, but only deployment can
-  prove the rest.
+  prove the rest. The Node controller path is proven end-to-end against real
+  GitHub; only the Cloudflare-hosted variant of that path is unproven.
 * Sustained load: many jobs per day, artifact growth, D1 row quotas, a full day
   of cron ticks.
 * A callback from a **cloud** runner to the controller (needs a public controller

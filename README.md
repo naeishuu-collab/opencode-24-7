@@ -12,7 +12,9 @@ implemented and verified on Windows, Linux and **GitHub Actions** (public repo
 stub suite green on ubuntu-24.04 + windows-latest, real free-model runs at $0,
 self-hosted `agent-job` with artifacts and a proven failure path). The cloud
 controller, its state machine, the independent artifact verification and the
-dashboard are implemented and tested locally; the **Cloudflare deployment** is
+dashboard are implemented and tested locally; the controller has also run a real
+job end to end - dispatched `agent-job` itself, matched the run, verified the
+artifact and marked the job `succeeded` at $0. The **Cloudflare deployment** is
 written but not executed (no account). See `docs/PHASE2D.md`.
 
 ## What runs today
