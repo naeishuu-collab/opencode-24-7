@@ -155,6 +155,11 @@ Executed locally (Windows 11 / node 24.21 and WSL2 Ubuntu / node 22.22):
   artifact, and marked the job `succeeded` - 36,482 tokens, **$0**, 1 attempt,
   no duplicate run id. Verdict `pending` (6 of 1440 min), coverage 100 %.
   Evidence: `runs/soak-real/` (gitignored).
+* Soak **workflow** smoke on GitHub-hosted Linux (run `39338006574`, dispatched
+  manually with `minutes=1, jobs=0`): the workflow registered, restored/saved the
+  cache, ran the controller in the runner, signed in, sampled 2/2, uploaded the
+  evidence artifact, and reported `pending`. This validates the workflow file and
+  `tools/soak.mjs` on Linux; it is not the 24 h measurement.
 
 Not verified:
 

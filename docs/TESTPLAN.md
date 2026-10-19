@@ -153,6 +153,8 @@ Every real-model run used the free tier only (`--max-cost-usd 0` and
 | `ci` 39262948350 | Phase 2D at `117594b`: 76 tests green on ubuntu-24.04 and windows-latest (controller suites included) + `node --check controller/worker.mjs` |
 | `agent-job` 39263425059 | **controller-dispatched** (`workflow_dispatch`, 72 s end to end): local controller tick -> dispatch -> run matched by marker -> artifact download -> independent verification -> `succeeded`, 30,836 tokens, $0, `npm test` exit 0, no commit |
 | `agent-job` 39337598363 | Phase 2E soak slice: `tools/soak.mjs` ran the real controller for 6 min with no manual tick, created one job, the controller dispatched this run (marker `oc24-job-20261019T224828Z-96ca-a1-9ad2`), polled it, verified the artifact and marked it `succeeded` - 36,482 tokens, $0, 18/18 samples, all soak invariants green, verdict `pending` (6 of 1440 min) |
+| `ci` 39337977395 | Phase 2E at `58c775c`: 87 tests green on ubuntu-latest and windows-latest + `node --check` for the worker and the soak harness |
+| `soak` 39338006574 | the soak workflow itself on GitHub-hosted Linux: 1-minute slice, controller in the runner, 2/2 samples, cache and evidence artifact, all invariants green, `pending` (manual smoke, not the 24 h run) |
 
 The Linux verification found a real bug: opencode resolves its project root from
 the `PWD` environment variable on POSIX, so a forwarded `PWD` made the agent
