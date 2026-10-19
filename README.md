@@ -6,8 +6,10 @@ agent change it → verify the change → keep the evidence (log, diff, usage)*.
 It is designed to run on GitHub Actions with **zero dependencies** (Node built-ins
 only) and **zero spend** (free models + `--max-cost-usd 0`).
 
-Status: Phase 1 - OpenCode adapter and the job runner work end to end;
-the Cloudflare control plane (Phase 2) is not built yet.
+Status: Phase 2 - the runner, the model/cost policy and the artifact scanner are
+implemented and verified on Windows and Linux; the three GitHub Actions
+workflows are written but have not run yet (no remote, awaiting approval). The
+Cloudflare control plane is not built.
 
 ## What runs today
 
@@ -41,11 +43,25 @@ The last stdout line is machine-readable:
 | 10 | agent-failed | agent exited non-zero after the allowed attempts |
 | 11 | timeout | wall clock limit hit, agent killed |
 | 12 | budget-exceeded | token, step or cost limit hit, agent killed |
-| 13 | invalid | bad arguments, non-git/dirty workspace, unusable `.opencode` config |
+| 13 | invalid | bad arguments, unlisted model, non-git/dirty workspace, unusable `.opencode` config |
 | 14 | infra-error | opencode missing, or older than 2.0.32 |
 | 15 | verify-failed | agent exited 0 but verification failed or timed out |
 | 20 | unknown | agent exited 0 with no events (never treated as success) |
 | 21 | cancelled | SIGINT/SIGTERM received |
+
+## Model and cost policy
+
+- **Verified-free allowlist** (`runner/config/free-models.json`, Phase 2): the
+  runner refuses any model that is not on the list *before* the agent starts
+  (exit 13). `--allow-unlisted-model` overrides it, and then an observed cost
+  report becomes mandatory: an unlisted model whose provider never reports cost
+  ends as `unknown` (exit 20), never as success.
+- **Cost evidence**: `step_finish` events carry `cost` and token counts, but the
+  CLI emits them for tool-calling steps only. A text-only answer therefore has
+  no cost data at all, which is why the policy is explicit instead of implied
+  (`job.json.costPolicy`).
+- `--require-cost-report` forces exit 20 when no cost was observed, even for an
+  allowlisted model. CI uses it for extra certainty.
 
 ## Safety model
 
@@ -67,6 +83,9 @@ The last stdout line is machine-readable:
   KEY/TOKEN/SECRET/PASSWORD/CREDENTIAL/AUTH plus common token shapes
   (`sk-…`, `AIza…`, `ghp_…`, JWT, `Bearer …`) are replaced with `[REDACTED]`
   in job.json, summary.md, diffs and logs.
+- **Artifact gate.** `tools/scan-run-dir.mjs` re-scans a whole run directory for
+  every known secret value and pattern. CI runs it before `upload-artifact` and
+  uploads only when the scan is clean, so a leaked artifact cannot ship.
 
 ## Options
 
@@ -81,6 +100,7 @@ The last stdout line is machine-readable:
 - `--agent` (default `build`), `--prompt-file`, `--job-id`, `--run-base`
 - `--opencode-bin`, `--min-opencode-version`, `--skip-version-check`
 - `--allow-web`, `--allow-external-dir`
+- `--allow-unlisted-model`, `--require-cost-report`
 
 Cost guard caveat: if a provider reports no cost at all, `job.json` says so in
 `notes` and the guard has nothing to observe. Free models that report `cost: 0`
@@ -88,11 +108,18 @@ were verified to be safe under `--max-cost-usd 0`.
 
 ## Running jobs on GitHub Actions
 
-`.github/workflows/agent-job.yml` (manual dispatch) runs a job on this very
-repository: the workflow installs opencode 2.0.32, imports credentials from the
-optional `OPENCODE_AUTH_JSON` secret (`opencode auth export` on your machine),
-runs the runner with `contents: read`, and uploads `runs/` as a 7-day artifact.
-The agent can therefore only produce a diff - never a push.
+Three workflows, all with `permissions: contents: read`:
+
+- `ci.yml` (push/PR): the stub suite on ubuntu + windows, no secrets involved.
+- `integration.yml` (manual): the real free model on ubuntu - proves a real bug
+  fix plus `node --test` verification and a real policy-blocked `git push`.
+- `agent-job.yml` (manual): a job against this repository. It records the actual
+  opencode version, proves the workflow token cannot push (API check that
+  `push` is false), imports credentials from the optional `OPENCODE_AUTH_JSON`
+  secret (`opencode auth export` on your machine), runs the runner with
+  `--max-cost-usd 0 --require-cost-report`, scans the run directory for secret
+  leaks and only then uploads `runs/` as a 7-day artifact. The agent can
+  therefore only produce a diff - never a push.
 
 Why self-hosted in this odd sense: GitHub's Acceptable Use rules allow the free
 Actions tier for developing the repository the workflow lives in (the pattern
@@ -107,10 +134,11 @@ npm test                                    # stub suite: deterministic, no netw
 RUN_OPENCODE_INTEGRATION=1 OC24_OPENCODE_BIN=<opencode 2.0.32> node --test tests/integration.test.mjs
 ```
 
-The stub suite covers every exit code, retries, budget kills, redaction, config
-merge/restore and argument validation. The opt-in integration tests run a real
-free model and prove that a real bug gets fixed and that a real `git push` is
-blocked by policy. Test matrix and known gaps: `docs/TESTPLAN.md`.
+The stub suite covers every exit code, retries, budget kills, redaction, the
+model/cost policy, the artifact scanner, config merge/restore and argument
+validation. The opt-in integration tests run a real free model and prove that a
+real bug gets fixed and that a real `git push` is blocked by policy. Test matrix,
+platform results and known gaps: `docs/TESTPLAN.md`.
 
 ## Layout
 
@@ -119,6 +147,8 @@ runner/run-job.mjs            job orchestrator (artifacts, budgets, verify)
 runner/lib/adapter.mjs        opencode adapter (args, events, kills, version floor)
 runner/lib/util.mjs           git/node helpers, secret redactor
 runner/config/agent-policies.json   policy template appended to target repos
+runner/config/free-models.json      verified-free model allowlist
+tools/scan-run-dir.mjs        artifact secret scanner (CI gate)
 tests/runner.test.mjs         stub suite
 tests/integration.test.mjs    real-model suite (opt-in)
 ```

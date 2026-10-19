@@ -1,0 +1,19 @@
+{
+  "verifiedAt": "2026-10-18",
+  "source": "output of `opencode models` on @opencode/cli 2.0.32; Console free tier (marketed as free for a limited time)",
+  "notes": [
+    "A model must be listed here before the runner will use it; anything else needs --allow-unlisted-model and then requires an observed cost report to count as success.",
+    "Re-verify this list after any opencode upgrade or provider pricing change (`opencode models` and one test run), and update verifiedAt."
+  ],
+  "models": [
+    "opencode/beam-free",
+    "opencode/deepseek-v4.1-flash-free",
+    "opencode/glm-5.3-flash-free",
+    "opencode/longcat-2.5-preview-free",
+    "opencode/mimo-v2.6-flash-free",
+    "opencode/nemotron-3-ultra-free",
+    "opencode/nemotron-3.5-lightning-free",
+    "opencode/nemotron-3.5-super-vl-free",
+    "opencode/space-bunny-free"
+  ]
+}

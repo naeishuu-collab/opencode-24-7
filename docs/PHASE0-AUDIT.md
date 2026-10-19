@@ -9,6 +9,12 @@ presented as fact.
 - Non-interactive run: `opencode run --standalone --format json --auto -m <model> --title <job> "<prompt>"`.
   `--standalone` must come **after** the subcommand; placing it before `run`
   fails with `Unrecognized flag`. Verified: v2.0.32 and v2.0.26 on Windows.
+- The project root is taken from the **`PWD` environment variable** on Linux, not
+  from the real process cwd: a child started with `cwd=<workspace>` but a
+  forwarded `PWD=<somewhere else>` reads, edits and runs shell commands in
+  `PWD` (and loads that directory's config, so policies are lost too). Verified
+  on WSL with v2.0.32; the runner therefore sets `PWD` to the workspace for the
+  agent and for the verify command.
 - JSON events (one per line): `step_start`, `tool_use`, `step_finish`, `text`,
   `error`. `step_finish.part` = `{reason, cost, tokens:{input, output, reasoning,
   cache:{read,write}}}`; `sessionID` is present on every event.
@@ -66,14 +72,25 @@ repository, for this repository, with `contents: read`.
   `tests/fixtures/sample-repo`, `node --test` verification passed, and a real
   `git push origin main` attempt was blocked by the installed policy
   (`tools.blockedByPolicy >= 1`).
+- Same full loop on Linux (Ubuntu on WSL2, opencode v2.0.32, node 22):
+  the integration suite passes, and a kept artifact run finished `success` in
+  45 s with 16,943 tokens, `costUsd: 0`, a one-line `src/calc.mjs` diff and a
+  clean `tools/scan-run-dir.mjs` scan.
+- Linux also exposed the `PWD` project-root behaviour above: with the caller's
+  `PWD` forwarded, the agent edited the runner's own repository instead of the
+  workspace and the policies never applied. Fixed in the runner, regression
+  tested in the stub suite.
 - Budget guards against the stub: wall-clock kill at 1 s (exit 11), token budget
   kill (exit 12), and kill on the first reported cost > $0 (exit 12).
 
 ## Not verified (Phase 2+ work)
 
-- The GitHub Actions workflow has never actually run: no GitHub remote and no
-  `gh` CLI on this machine, so runner minutes, artifact upload and
-  `OPENCODE_AUTH_JSON` import are unproven.
+- The GitHub Actions workflows have never actually run: no GitHub remote and no
+  `gh` CLI on this machine, so runner minutes, artifact upload, the
+  least-privilege API proof, the upload gate and the CI path of
+  `OPENCODE_AUTH_JSON` are unproven. `opencode auth import` was verified locally
+  against a file (and `auth export` on both platforms); the stdin form used by
+  the workflows is not yet exercised.
 - No Cloudflare deployment; no CF account. Workers/D1 logs, limits and cron
   behaviour are doc-based only.
 - Running the opencode server inside a Durable Object (`@opencode/sdk/workerd`

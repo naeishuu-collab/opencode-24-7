@@ -16,8 +16,11 @@ const sid = "ses_stub00000000000000000000";
 const out = (o) => process.stdout.write(JSON.stringify(o) + "\n");
 const base = (type, part) => ({ type, timestamp: Date.now(), sessionID: sid, part });
 const stepStart = () => out(base("step_start", { type: "step-start" }));
-const stepFinish = ({ tokens = {}, cost = 0 } = {}) =>
-  out(base("step_finish", { type: "step-finish", reason: "tool-calls", cost, tokens }));
+const stepFinish = ({ tokens = {}, cost } = {}) => {
+  const part = { type: "step-finish", reason: "tool-calls", tokens };
+  if (cost !== undefined) part.cost = cost; // providers that never report cost omit the field entirely
+  out(base("step_finish", part));
+};
 const text = (t) => out(base("text", { type: "text", text: t }));
 const tool = (name, status = "completed") => out(base("tool_use", { type: "tool", tool: name, state: { status } }));
 const failWith = (type, message, code) => {
@@ -53,8 +56,8 @@ const okBody = () => {
   }
   fs.writeFileSync("stub-touched.txt", "ok\n");
   tool("write");
-  stepFinish({ tokens: { input: 100, output: 20, reasoning: 0, cache: { read: 0, write: 0 } } });
-  text("stub ok");
+  stepFinish({ tokens: { input: 100, output: 20, reasoning: 0, cache: { read: 0, write: 0 } }, cost: 0 });
+  text(`stub ok pwd=${process.env.PWD ?? ""}`);
 };
 
 switch (mode) {
@@ -105,10 +108,28 @@ switch (mode) {
     stepFinish({ tokens: { input: 100, output: 10, reasoning: 0, cache: { read: 0, write: 0 } }, cost: 1.25 });
     hang();
     break;
+  case "nocost":
+    // events but no cost field at all (provider that does not report usage)
+    stepStart();
+    tool("read");
+    stepFinish({ tokens: { input: 100, output: 20, reasoning: 0, cache: { read: 0, write: 0 } } });
+    text("stub nocost");
+    process.exit(0);
+    break;
+  case "leaky-file": {
+    const secret = process.env.OC24_TEST_SECRET ?? "no-secret";
+    stepStart();
+    fs.writeFileSync("agent-output.txt", `token=${secret}\n`);
+    tool("write");
+    stepFinish({ tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 0, write: 0 } }, cost: 0 });
+    text("wrote agent-output.txt");
+    process.exit(0);
+    break;
+  }
   case "leaky": {
     const secret = process.env.OC24_TEST_SECRET ?? "no-secret";
     stepStart();
-    stepFinish({ tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 0, write: 0 } } });
+    stepFinish({ tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 0, write: 0 } }, cost: 0 });
     process.stderr.write(`stderr leaks ${secret}\n`);
     text(`the secret is ${secret} ok`);
     process.exit(0);

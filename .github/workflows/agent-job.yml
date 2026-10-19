@@ -11,7 +11,7 @@ on:
         required: true
         type: string
       model:
-        description: provider/model (free models only unless you accept the cost)
+        description: provider/model; must be on the verified-free allowlist
         required: false
         default: opencode/deepseek-v4.1-flash-free
         type: string
@@ -50,14 +50,37 @@ jobs:
       JOB_ATTEMPTS: ${{ inputs.max_attempts }}
       RUN_BASE: ${{ runner.temp }}/oc24-runs
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
 
       - name: Install opencode CLI (policies need 2.0.32 or newer)
         run: npm i -g @opencode/cli@2.0.32
+
+      - name: Record the actual opencode version
+        run: opencode --version
+
+      - name: Prove the workflow token cannot push (least privilege)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          perms=$(curl -fsS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}")
+          # the API pretty-prints; flatten before matching
+          flat=$(printf '%s' "$perms" | tr -d '\n\r\t ')
+          found=$(printf '%s' "$flat" | grep -o '"permissions":{[^}]*}' || true)
+          if [ -z "$found" ]; then
+            echo "::error::could not read token permissions from the API; refusing to assume read-only"
+            exit 1
+          fi
+          echo "$found"
+          if printf '%s' "$flat" | grep -Eq '"push":true'; then
+            echo "::error::the workflow token has push permission; this job must stay read-only"
+            exit 1
+          fi
+          echo "token is read-only for this repository"
 
       - name: Import opencode credentials
         env:
@@ -75,6 +98,8 @@ jobs:
         run: |
           extra=()
           if [ -n "$JOB_VERIFY" ]; then extra+=(--verify-cmd "$JOB_VERIFY"); fi
+          # set -e is active: capture the code instead of aborting the step
+          code=0
           node runner/run-job.mjs \
             --workspace "$GITHUB_WORKSPACE" \
             --run-base "$RUN_BASE" \
@@ -83,8 +108,8 @@ jobs:
             --timeout-sec "$JOB_TIMEOUT" \
             --max-attempts "$JOB_ATTEMPTS" \
             --max-cost-usd 0 \
-            "${extra[@]}"
-          code=$?
+            --require-cost-report \
+            "${extra[@]}" || code=$?
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
           exit 0
 
@@ -96,9 +121,24 @@ jobs:
           done
           echo "exit_code=${{ steps.agent.outputs.exit_code }}" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload job artifacts
+      - name: Scan the run directory for secret leaks
+        id: scan
         if: always()
-        uses: actions/upload-artifact@v4
+        env:
+          OPENCODE_AUTH_JSON: ${{ secrets.OPENCODE_AUTH_JSON }}
+        run: |
+          if [ -d "$RUN_BASE" ]; then
+            node tools/scan-run-dir.mjs "$RUN_BASE"
+            echo "clean=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "no run directory; nothing to scan"
+            echo "clean=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload job artifacts
+        # upload only when the scan proved the artifacts are clean (fail closed)
+        if: always() && steps.scan.outputs.clean == 'true'
+        uses: actions/upload-artifact@v7
         with:
           name: oc24-job-${{ github.run_id }}
           path: ${{ runner.temp }}/oc24-runs

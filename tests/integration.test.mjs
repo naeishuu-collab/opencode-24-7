@@ -18,8 +18,13 @@ const FIXTURE = path.join(HERE, "fixtures", "sample-repo");
 const BIN = process.env.OC24_OPENCODE_BIN ?? "opencode";
 const MODEL = process.env.OC24_MODEL ?? "opencode/deepseek-v4.1-flash-free";
 const enabled = process.env.RUN_OPENCODE_INTEGRATION === "1";
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "oc24-integration-"));
+// All scratch data goes under OC24_TMP_ROOT when set, so CI can scan exactly
+// that directory for leaked secrets afterwards.
+const TMP_ROOT = process.env.OC24_TMP_ROOT ?? os.tmpdir();
+fs.mkdirSync(TMP_ROOT, { recursive: true });
+const TMP = fs.mkdtempSync(path.join(TMP_ROOT, "oc24-integration-"));
 process.on("exit", () => {
+  if (process.env.OC24_KEEP_TMP === "1") return; // CI keeps the run dirs for scanning/upload
   try {
     fs.rmSync(TMP, { recursive: true, force: true });
   } catch {

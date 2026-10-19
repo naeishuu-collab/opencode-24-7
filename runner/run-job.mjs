@@ -36,6 +36,7 @@ const LOG_CAP = 20 * 1024 * 1024;
 const PATCH_CAP = 5 * 1024 * 1024;
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const POLICY_TEMPLATE = JSON.parse(fs.readFileSync(path.join(HERE, "config", "agent-policies.json"), "utf8"));
+const FREE_MODELS = JSON.parse(fs.readFileSync(path.join(HERE, "config", "free-models.json"), "utf8")).models;
 
 function usage() {
   return `usage: node runner/run-job.mjs --workspace <git-repo> --prompt <text> --model <provider/model> [options]
@@ -56,6 +57,9 @@ options:
   --min-opencode-version <x.y.z>  minimum enforced version (default ${MIN_OPENCODE_VERSION.join(".")})
   --allow-web                     allow webfetch/websearch (denied by default)
   --allow-external-dir            allow file access outside the workspace (denied by default)
+  --allow-unlisted-model          allow a model outside the verified-free allowlist;
+                                  success then additionally requires an observed cost report
+  --require-cost-report           fail closed (exit 20) when the provider never reports cost
   --skip-version-check            do not enforce the minimum opencode version (unsafe)
   --help
 
@@ -68,7 +72,7 @@ function parseArgs(argv) {
     "max-cost-usd", "max-steps", "max-attempts", "verify-cmd", "verify-timeout-sec",
     "run-base", "job-id", "opencode-bin", "min-opencode-version",
   ]);
-  const flags = new Set(["allow-web", "allow-external-dir", "skip-version-check", "help"]);
+  const flags = new Set(["allow-web", "allow-external-dir", "allow-unlisted-model", "require-cost-report", "skip-version-check", "help"]);
   const cfg = { values: {}, flags: new Set() };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -100,6 +104,21 @@ function numOr(fail_, name, value, dflt) {
   const n = Number(value);
   if (!Number.isFinite(n) || n < 0) throw fail("invalid", `invalid --${name}: ${value}`);
   return n;
+}
+
+// An unknown or paid model must be refused before the agent is started, and a
+// model we have not verified as free must prove it reported cost $0.
+function checkModel(cfg) {
+  const model = cfg.values.model;
+  const listed = FREE_MODELS.includes(model);
+  if (!listed && !cfg.flags.has("allow-unlisted-model")) {
+    throw fail(
+      "invalid",
+      `model "${model}" is not in the verified-free allowlist (runner/config/free-models.json); ` +
+        "use a listed model or pass --allow-unlisted-model (unlisted models may cost money)",
+    );
+  }
+  return { listed, requireCostReport: !listed || cfg.flags.has("require-cost-report") };
 }
 
 function loadPolicies(cfg) {
@@ -198,6 +217,8 @@ function runVerify(workspace, cmd, timeoutSec, redact, runDir) {
   return new Promise((resolve) => {
     const child = spawn(cmd, {
       cwd: workspace,
+      // PWD must match the real cwd: shells and some CLIs trust $PWD over getcwd().
+      env: { ...process.env, PWD: workspace },
       shell: true,
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
@@ -262,6 +283,13 @@ async function executeJob(cfg, ctx) {
   const prompt = v.prompt ?? (v["prompt-file"] ? fs.readFileSync(path.resolve(v["prompt-file"]), "utf8") : null);
   if (!prompt) throw fail("invalid", "missing --prompt or --prompt-file");
   if (!v.model) throw fail("invalid", "missing --model");
+  const modelPolicy = checkModel(cfg);
+  ctx.result.costPolicy = {
+    model: v.model,
+    modelAllowlisted: modelPolicy.listed,
+    requireCostReport: modelPolicy.requireCostReport,
+    costReported: null,
+  };
 
   if (!fs.existsSync(workspace) || !fs.statSync(workspace).isDirectory()) {
     throw fail("invalid", `workspace not found: ${workspace}`);
@@ -339,7 +367,9 @@ async function executeJob(cfg, ctx) {
         bin,
         args,
         cwd: workspace,
-        env: { ...process.env },
+        // opencode resolves the project root from PWD on POSIX, so never forward
+        // the caller's PWD: without this the agent edits the wrong repository.
+        env: { ...process.env, PWD: workspace },
         budgets,
         onLine,
         redact,
@@ -386,6 +416,7 @@ async function executeJob(cfg, ctx) {
   if (patch.truncated) ctx.result.notes.push(`diff.patch truncated at ${PATCH_CAP} bytes`);
   if (logBytes >= LOG_CAP) ctx.result.notes.push(`logs/opencode.jsonl capped at ${LOG_CAP} bytes`);
   if (!agg.costSeen) ctx.result.notes.push("provider did not report cost; cost guard could not observe usage");
+  ctx.result.costPolicy.costReported = agg.costSeen;
   const after = porcelain(workspace, excludes);
   ctx.result.target.commitAfter = git(workspace, ["rev-parse", "HEAD"]).stdout.trim();
   ctx.result.target.dirtyAfter = after !== "";
@@ -403,6 +434,13 @@ async function executeJob(cfg, ctx) {
   if (last.exitCode === 0) {
     if (agg.steps === 0 && agg.textParts === 0) {
       return { status: "unknown", exitCode: EXIT.unknown, reason: "opencode exited 0 but produced no events; result unknown (not treated as success)" };
+    }
+    if (modelPolicy.requireCostReport && !agg.costSeen) {
+      return {
+        status: "unknown",
+        exitCode: EXIT.unknown,
+        reason: "provider never reported cost and this job requires a cost report (unlisted model or --require-cost-report); refusing to treat the result as success",
+      };
     }
     if (v["verify-cmd"]) {
       const vt = numOr(fail, "verify-timeout-sec", v["verify-timeout-sec"], 600);
@@ -458,6 +496,7 @@ function buildSkeleton(cfg, jobId, workspace, runDir) {
     opencode: { bin: null, version: null },
     workspace,
     budgets: null,
+    costPolicy: null,
     usage: null,
     session: { id: null },
     tools: { calls: 0, errors: 0, blockedByPolicy: 0, recentErrors: [] },

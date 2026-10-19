@@ -10,7 +10,9 @@ import { fileURLToPath } from "node:url";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "..");
 const RUNNER = path.join(ROOT, "runner", "run-job.mjs");
+const SCANNER = path.join(ROOT, "tools", "scan-run-dir.mjs");
 const STUB = path.join(HERE, "stubs", "fake-opencode.mjs");
+const FREE_MODEL = "opencode/deepseek-v4.1-flash-free";
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "oc24-tests-"));
 process.on("exit", () => {
   try {
@@ -47,7 +49,7 @@ function makeRepo(files = {}) {
 
 function runRunner(dir, extraArgs = [], env = {}) {
   const runBase = fs.mkdtempSync(path.join(TMP, "runs-"));
-  const args = [RUNNER, "--workspace", dir, "--model", "stub/model", "--opencode-bin", STUB, "--run-base", runBase, ...extraArgs];
+  const args = [RUNNER, "--workspace", dir, "--model", FREE_MODEL, "--opencode-bin", STUB, "--run-base", runBase, ...extraArgs];
   const r = spawnSync(process.execPath, args, {
     encoding: "utf8",
     env: { ...process.env, ...env },
@@ -90,6 +92,17 @@ test("ok: success with job artifacts, diff and restored workspace", () => {
   // the temporary config is registered in .git/info/exclude, not in the diff
   assert.match(fs.readFileSync(path.join(dir, ".git", "info", "exclude"), "utf8"), /\.opencode\/opencode\.json/);
   assert.ok(!readRun(result.jobDir, "diff.patch").includes(".opencode/opencode.json"));
+});
+
+test("env: the agent sees PWD of the workspace, not the caller's", () => {
+  const dir = makeRepo();
+  const elsewhere = path.join(TMP, "caller-pwd");
+  const { code, job } = runRunner(dir, PROMPT, { OC24_STUB_MODE: "ok", PWD: elsewhere });
+  assert.equal(code, 0);
+  // opencode resolves its project root from PWD on POSIX: a forwarded PWD makes
+  // the agent operate on the caller's directory (seen in the WSL verification).
+  assert.ok(job.finalText.includes(dir), `finalText should contain the workspace, got: ${job.finalText}`);
+  assert.ok(!job.finalText.includes(elsewhere), `finalText must not contain the caller PWD, got: ${job.finalText}`);
 });
 
 test("silent: exit 0 with no events is unknown, never success", () => {
@@ -200,6 +213,90 @@ test("redaction: env secret never reaches job.json, summary or logs", () => {
   assert.match(job.finalText, /\[REDACTED\]/);
 });
 
+test("redaction: a secret the agent writes into a file is redacted out of the diff", () => {
+  const dir = makeRepo();
+  const secret = "supersecretvalue456";
+  const { code, result } = runRunner(dir, PROMPT, { OC24_STUB_MODE: "leaky-file", OC24_TEST_SECRET: secret });
+  assert.equal(code, 0);
+  const patch = readRun(result.jobDir, "diff.patch");
+  assert.ok(!patch.includes(secret), "diff.patch leaked the secret");
+  assert.match(patch, /\[REDACTED\]/);
+});
+
+test("redaction: no file in the run directory contains the secret (artifact scan)", () => {
+  const dir = makeRepo();
+  const secret = "supersecretvalue789";
+  const { code, result } = runRunner(dir, PROMPT, { OC24_STUB_MODE: "leaky", OC24_TEST_SECRET: secret });
+  assert.equal(code, 0);
+  const offenders = [];
+  const walk = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.isFile() && fs.readFileSync(p).includes(secret)) offenders.push(path.relative(result.jobDir, p));
+    }
+  };
+  walk(result.jobDir);
+  assert.deepEqual(offenders, []);
+});
+
+test("scanner: clean run directory passes, leaked file fails", () => {
+  const dir = makeRepo();
+  const secret = "supersecretvalue321";
+  const { result } = runRunner(dir, PROMPT, { OC24_STUB_MODE: "ok", OC24_TEST_SECRET: secret });
+
+  const clean = spawnSync(process.execPath, [SCANNER, result.jobDir], {
+    encoding: "utf8",
+    env: { ...process.env, OC24_TEST_SECRET: secret },
+  });
+  assert.equal(clean.status, 0, clean.stderr);
+
+  const dirty = path.join(TMP, `dirty-${++seq}`);
+  fs.mkdirSync(dirty, { recursive: true });
+  fs.writeFileSync(path.join(dirty, "leak.txt"), `token=${secret}\n`);
+  const found = spawnSync(process.execPath, [SCANNER, dirty], {
+    encoding: "utf8",
+    env: { ...process.env, OC24_TEST_SECRET: secret },
+  });
+  assert.equal(found.status, 1);
+  assert.match(found.stderr, /leak\.txt/);
+  assert.ok(!found.stderr.includes(secret), "scanner must not print the secret");
+
+  const missing = spawnSync(process.execPath, [SCANNER, path.join(TMP, "no-such-dir")], { encoding: "utf8" });
+  assert.equal(missing.status, 0);
+});
+
+test("model allowlist: unlisted model is refused before the agent starts", () => {
+  const dir = makeRepo();
+  const { code, result, job } = runRunner(dir, ["--prompt", "x", "--model", "some/paid-model"], { OC24_STUB_MODE: "ok" });
+  assert.equal(code, 13);
+  assert.equal(result.status, "invalid");
+  assert.match(job.reason, /not in the verified-free allowlist/);
+  assert.equal(job.attempts, 0);
+  assert.ok(!fs.existsSync(path.join(dir, ".opencode")), "agent must not have been started");
+});
+
+test("model allowlist: unlisted model needs a cost report, allowlisted model does not", () => {
+  const dir = makeRepo();
+  const unlisted = runRunner(dir, ["--prompt", "x", "--model", "some/other-model", "--allow-unlisted-model"], {
+    OC24_STUB_MODE: "nocost",
+  });
+  assert.equal(unlisted.code, 20);
+  assert.equal(unlisted.result.status, "unknown");
+  assert.match(unlisted.job.reason, /never reported cost/);
+  assert.equal(unlisted.job.costPolicy.requireCostReport, true);
+  assert.equal(unlisted.job.costPolicy.costReported, false);
+
+  const listed = runRunner(dir, [...PROMPT, "--require-cost-report"], { OC24_STUB_MODE: "nocost" });
+  assert.equal(listed.code, 20);
+  assert.equal(listed.job.costPolicy.requireCostReport, true);
+
+  const listedDefault = runRunner(dir, PROMPT, { OC24_STUB_MODE: "nocost" });
+  assert.equal(listedDefault.code, 0);
+  assert.equal(listedDefault.job.costPolicy.requireCostReport, false);
+  assert.match(listedDefault.job.notes.join("\n"), /did not report cost/);
+});
+
 test("verify: passing command keeps success, failing command is verify-failed", () => {
   const dir = makeRepo();
   const pass = runRunner(dir, [...PROMPT, "--verify-cmd", 'node -e "process.exit(0)"'], { OC24_STUB_MODE: "ok" });
@@ -274,7 +371,7 @@ test("infra: missing opencode binary is infra-error, not agent-failed", () => {
   const dir = makeRepo();
   const missing = spawnSync(
     process.execPath,
-    [RUNNER, "--workspace", dir, "--model", "m", "--opencode-bin", path.join(TMP, "does-not-exist"), ...PROMPT, "--run-base", path.join(TMP, "runs-missing")],
+    [RUNNER, "--workspace", dir, "--model", FREE_MODEL, "--opencode-bin", path.join(TMP, "does-not-exist"), ...PROMPT, "--run-base", path.join(TMP, "runs-missing")],
     { encoding: "utf8" },
   );
   assert.equal(missing.status, 14);
@@ -284,9 +381,9 @@ test("invalid arguments exit 13", () => {
   const dir = makeRepo();
   const base = [RUNNER, "--workspace", dir, "--opencode-bin", STUB, "--run-base", path.join(TMP, `runs-inv-${++seq}`)];
   for (const args of [
-    [...base, "--model", "m", "--prompt", "x", "--nope"],
-    [...base, "--model", "m", "--prompt", "x", "--max-tokens", "abc"],
-    [...base, "--model", "m"],
+    [...base, "--model", FREE_MODEL, "--prompt", "x", "--nope"],
+    [...base, "--model", FREE_MODEL, "--prompt", "x", "--max-tokens", "abc"],
+    [...base, "--model", FREE_MODEL],
     [...base, "--prompt", "x"],
   ]) {
     const r = spawnSync(process.execPath, args, { encoding: "utf8" });
@@ -299,7 +396,7 @@ test("cancel: SIGINT stops a hanging agent", { skip: process.platform === "win32
   const runBase = fs.mkdtempSync(path.join(TMP, "runs-cancel-"));
   const child = spawn(
     process.execPath,
-    [RUNNER, "--workspace", dir, "--model", "stub/model", "--opencode-bin", STUB, "--run-base", runBase, ...PROMPT, "--timeout-sec", "120"],
+    [RUNNER, "--workspace", dir, "--model", FREE_MODEL, "--opencode-bin", STUB, "--run-base", runBase, ...PROMPT, "--timeout-sec", "120"],
     { env: { ...process.env, OC24_STUB_MODE: "hang" }, stdio: ["ignore", "pipe", "pipe"] },
   );
   await new Promise((resolve) => {

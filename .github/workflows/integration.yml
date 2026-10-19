@@ -1,0 +1,80 @@
+name: integration
+
+# Opt-in suite that runs the real (free) model: proves the adapter against real
+# JSON events and proves that a real `git push` is blocked by policy.
+# Manual only, so pull requests never see the credential secret.
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: provider/model; must be on the verified-free allowlist
+        required: false
+        default: opencode/deepseek-v4.1-flash-free
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration
+  cancel-in-progress: false
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      RUN_OPENCODE_INTEGRATION: "1"
+      OC24_MODEL: ${{ inputs.model }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Install opencode CLI (policies need 2.0.32 or newer)
+        run: npm i -g @opencode/cli@2.0.32
+
+      - name: Record the actual opencode version
+        run: opencode --version
+
+      - name: Import opencode credentials
+        env:
+          OPENCODE_AUTH_JSON: ${{ secrets.OPENCODE_AUTH_JSON }}
+        run: |
+          if [ -z "$OPENCODE_AUTH_JSON" ]; then
+            echo "::error::the OPENCODE_AUTH_JSON secret is required for the integration suite"
+            exit 1
+          fi
+          printf '%s' "$OPENCODE_AUTH_JSON" | opencode auth import
+
+      - name: Run integration tests
+        env:
+          OC24_TMP_ROOT: ${{ runner.temp }}/oc24-it
+          OC24_KEEP_TMP: "1" # keep the run dirs so the scan/artifact steps see them
+        run: node --test tests/integration.test.mjs
+
+      - name: Scan the run directories for secret leaks
+        id: scan
+        if: always()
+        env:
+          OC24_TMP_ROOT: ${{ runner.temp }}/oc24-it
+          OPENCODE_AUTH_JSON: ${{ secrets.OPENCODE_AUTH_JSON }}
+        run: |
+          if [ -d "$OC24_TMP_ROOT" ]; then
+            node tools/scan-run-dir.mjs "$OC24_TMP_ROOT"
+          else
+            echo "no run directory; nothing to scan"
+          fi
+          echo "clean=true" >> "$GITHUB_OUTPUT"
+
+      - name: Upload integration artifacts
+        # upload only when the scan proved the artifacts are clean (fail closed)
+        if: always() && steps.scan.outputs.clean == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: oc24-integration-${{ github.run_id }}
+          path: ${{ runner.temp }}/oc24-it
+          retention-days: 7
+          if-no-files-found: warn
