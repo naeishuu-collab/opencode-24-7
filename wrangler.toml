@@ -2,16 +2,27 @@
 #
 # Not deployed yet: this repository has no Cloudflare account/credentials, so
 # the worker path is implemented and covered by the same tests as the local
-# server, but the real deployment is unverified (docs/PHASE2D.md).
+# server, but the real deployment is unverified (docs/PHASE2E.md).
 #
-#   wrangler d1 create oc24-controller      # then paste database_id below
-#   wrangler d1 migrations apply --help     # (schema is created by the app on first use)
-#   wrangler secret put OC24_ADMIN_TOKEN
-#   wrangler secret put OC24_GITHUB_TOKEN
+#   wrangler login
+#   wrangler d1 create oc24-controller         # then paste database_id below
+#   wrangler d1 execute oc24-controller --file migrations/0001_schema.sql --remote
+#   wrangler secret put OC24_ADMIN_TOKEN       # dashboard/admin auth
+#   wrangler secret put OC24_GITHUB_TOKEN      # dispatch + run polling (fine-grained PAT, actions:write + contents:read)
+#   wrangler secret put OC24_GOAL_KEY          # optional: encrypt goal text at rest
 #   wrangler deploy
 #
-# Free-plan limits that matter (2026-10): 100k requests/day, Cron Triggers
-# included, D1 free tier (5M row reads/day, 100k row writes/day, 5 GB).
+# Verified free-plan limits (docs, 2026-10):
+#   Workers Free  100k requests/day, 10 ms CPU per request, 10 ms CPU per cron,
+#                 15 min wall time per cron, 5 cron triggers per account,
+#                 50 subrequests per invocation, 5 KB per variable.
+#   D1 Free       500 MB per database, 5 GB per account, 50 queries per Worker
+#                 invocation, 2 MB per row, 50 bytes per LIKE pattern.
+#                 The controller keeps a single cron tick well under 50 queries
+#                 (OC24_MAX_POLLS_PER_TICK=5, OC24_MAX_DISPATCHES_PER_TICK=1) and
+#                 prunes events in batches.
+#   Cost          both products stay free unless the account is upgraded; this
+#                 repository never enables a paid feature.
 
 name = "oc24-controller"
 main = "controller/worker.mjs"
@@ -26,6 +37,7 @@ binding = "DB"
 database_name = "oc24-controller"
 # Replace after `wrangler d1 create oc24-controller` (the id is account-specific).
 database_id = "REPLACE_WITH_D1_DATABASE_ID"
+migrations_dir = "migrations"
 
 [[rules]]
 type = "Text"
@@ -34,16 +46,22 @@ fallthrough = true
 
 [triggers]
 # Free plan allows Cron Triggers; every 5 minutes keeps the request count tiny
-# (288/day of the 100k/day free allowance).
+# (288/day of the 100k/day free allowance). The tick also runs housekeeping at
+# most once every 6 h, so a missed cron only delays it.
 crons = ["*/5 * * * *"]
 
 [vars]
 OC24_REPO = "naeishuu-collab/opencode-24-7"
 OC24_REF = "main"
 OC24_WORKFLOW = "agent-job.yml"
+OC24_AGENT = "opencode"
 OC24_MAX_JOBS_PER_DAY = "50"
 OC24_MAX_DISPATCH_PER_DAY = "20"
 OC24_MAX_CONCURRENT = "2"
 OC24_MAX_COST_USD = "0"
+OC24_MAX_POLLS_PER_TICK = "5"
+OC24_MAX_DISPATCHES_PER_TICK = "1"
+OC24_EVENT_RETENTION_DAYS = "30"
+OC24_GOAL_RETENTION_DAYS = "0"
 # Set to the deployed URL so runners can post advisory heartbeats:
 # OC24_CONTROLLER_URL = "https://oc24-controller.<account>.workers.dev"

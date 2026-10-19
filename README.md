@@ -6,7 +6,7 @@ agent change it → verify the change → keep the evidence (log, diff, usage)*.
 It is designed to run on GitHub Actions with **zero dependencies** (Node built-ins
 only) and **zero spend** (free models + `--max-cost-usd 0`).
 
-Status: Phase 2D - the runner, the model/cost policy and the artifact scanner are
+Status: Phase 2E - the runner, the model/cost policy and the artifact scanner are
 implemented and verified on Windows, Linux and **GitHub Actions** (public repo
 [`naeishuu-collab/opencode-24-7`](https://github.com/naeishuu-collab/opencode-24-7);
 stub suite green on ubuntu-24.04 + windows-latest, real free-model runs at $0,
@@ -14,8 +14,11 @@ self-hosted `agent-job` with artifacts and a proven failure path). The cloud
 controller, its state machine, the independent artifact verification and the
 dashboard are implemented and tested locally; the controller has also run a real
 job end to end - dispatched `agent-job` itself, matched the run, verified the
-artifact and marked the job `succeeded` at $0. The **Cloudflare deployment** is
-written but not executed (no account). See `docs/PHASE2D.md`.
+artifact and marked the job `succeeded` at $0. Phase 2E adds retention,
+pagination/search, encrypted goals, the agent adapter boundary and a soak
+harness. The **Cloudflare deployment** is written but not executed (no account),
+and the 24 h soak is **PENDING** by its own strict definition. See
+`docs/PHASE2E.md`.
 
 ## What runs today
 
@@ -141,7 +144,7 @@ used by Renovate and Copilot agentic workflows). Driving *other* repositories
 from one account's free minutes is the configuration to avoid. See
 `docs/PHASE0-AUDIT.md`.
 
-## Controller and dashboard (Phase 2D)
+## Controller and dashboard (Phase 2D/2E)
 
 The runner answers "can an agent do the work". The controller answers "who
 decides what runs, when, and whether the result is real".
@@ -150,6 +153,7 @@ decides what runs, when, and whether the result is real".
 export OC24_ADMIN_TOKEN=<long random token>    # required; the server refuses to start without it
 export OC24_REPO=<owner>/<repo>
 export OC24_GITHUB_TOKEN=<token>               # optional; without it jobs stay queued
+export OC24_GOAL_KEY=<>=16 chars>              # optional; encrypts goal text at rest
 node controller/server.mjs                     # dashboard + API on http://127.0.0.1:8787
 node controller/server.mjs --print-config       # effective settings (tokens never printed)
 ```
@@ -161,15 +165,28 @@ It keeps a persistent queue (SQLite locally, D1 in the cloud), dispatches
 `unknown` and wait for a human - it never guesses, and it never re-runs a dispatch
 whose outcome is unknown unless a search proves no run exists for it.
 
-Dashboard: create jobs (free models only), watch queue/run/verify state, read
-artifact-verified metrics (model, tokens, cost, verification, diff), approve
-external-effect jobs, cancel runs, resolve `unknown` jobs. Real API data only -
-no simulated progress.
+Dashboard: create jobs (free models only, agent selectable), watch
+queue/run/verify state, read artifact-verified metrics (model, tokens, cost,
+verification, diff), approve external-effect jobs, cancel runs, resolve `unknown`
+jobs, search and page through jobs. Real API data only - no simulated progress.
+
+Operations: events age out (`OC24_EVENT_RETENTION_DAYS`, default 30), finished
+goals can be scrubbed (`OC24_GOAL_RETENTION_DAYS`), the dashboard can search by
+id or goal, and the API pages with `limit`/`offset` and reports `total`. With
+`OC24_GOAL_KEY` set, goal text is AES-256-GCM ciphertext in the database and only
+an authenticated session sees it.
+
+Agent adapters (`controller/lib/agents.mjs`): OpenCode is available; Codex CLI,
+Claude Code and Gemini CLI are declared with `available: false` and are rejected
+at creation until their free tier, auth and terms are verified. An adapter only
+names its workflow, its runner secret and its limits; the state machine and
+verification are shared.
 
 Scheduler: `POST /api/tick` (external cron) or the Cloudflare Cron Trigger
 (`wrangler.toml`, `*/5`). `controller/worker.mjs` runs the identical state machine
-on D1; deployment needs a Cloudflare account and is the one part of this phase
-that has **not** been executed.
+on D1, sized for the free plan (5 polls and 1 dispatch per tick, <= 45 statements;
+D1 Free allows 50). Deployment needs a Cloudflare account and is still
+**unexecuted**; `docs/PHASE2E.md` has the exact runbook.
 
 ## Tests
 
@@ -197,17 +214,23 @@ controller/app.mjs            HTTP handler (API + dashboard), one fetch signatur
 controller/server.mjs         Node entry: http bridge, tick loop, sqlite store
 controller/worker.mjs         Cloudflare Worker entry: fetch + scheduled, D1
 controller/lib/engine.mjs     job state machine, leases, idempotency, contract check
-controller/lib/store.mjs      SQL store (SQLite and D1 executors)
+controller/lib/agents.mjs     agent adapters (OpenCode now; Codex/Claude/Gemini declared)
+controller/lib/secretbox.mjs  optional AES-GCM encryption of goal text at rest
+controller/lib/store.mjs      SQL store (SQLite and D1 executors, migrations)
 controller/lib/github.mjs     Actions REST client (dispatch, runs, artifacts, cancel)
 controller/lib/zip.mjs        artifact/log zip reader (Web DecompressionStream)
-web/                          dashboard (vanilla JS, dark/light, mobile)
+migrations/0001_schema.sql    D1 schema for `wrangler d1 execute --file`
+web/                          dashboard (vanilla JS, dark/light, mobile, paging/search)
 tools/scan-run-dir.mjs        artifact secret scanner (CI gate)
+tools/soak.mjs                24 h soak harness (slices, SIGKILL restarts, invariants)
 tests/runner.test.mjs         stub suite
 tests/controller.test.mjs     controller unit + handler suite
 tests/controller-e2e.test.mjs real child process, fake GitHub, restart recovery
+tests/phase2e.test.mjs        adapters, paging/search, retention, encryption, D1 budget
 tests/report.test.mjs         runner -> controller report path
 tests/integration.test.mjs    real-model suite (opt-in)
 docs/PHASE2D.md               controller design, free-tier math, unverified list
+docs/PHASE2E.md               cloud plan limits, adapters, retention, soak runbook
 ```
 
 MIT licensed.

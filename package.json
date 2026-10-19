@@ -10,6 +10,10 @@
   },
   "scripts": {
     "test": "node --test \"tests/*.test.mjs\"",
-    "agent": "node runner/run-job.mjs"
+    "agent": "node runner/run-job.mjs",
+    "soak": "node tools/soak.mjs",
+    "d1:init:local": "npx wrangler d1 execute oc24-controller --file migrations/0001_schema.sql --local",
+    "d1:init:remote": "npx wrangler d1 execute oc24-controller --file migrations/0001_schema.sql --remote",
+    "deploy": "npx wrangler deploy"
   }
 }

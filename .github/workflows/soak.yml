@@ -1,0 +1,92 @@
+name: soak
+
+# 24 h soak in slices. A GitHub-hosted job cannot run longer than 6 h, so each
+# scheduled slice runs the real controller for ~5 h 58 m, persists the database
+# and the accumulated runtime in the Actions cache, and the next slice continues
+# on the same state. The report only says `soak_24h: verified` when a 24 h window
+# has elapsed with >= 98 % measured uptime.
+#
+# The schedule is intentionally not enabled here: it is a temporary, finite test
+# (it stops being useful once the 24 h verdict is recorded) and enabling a
+# recurring workflow on a public repository is a separate, approved change.
+#
+# Manual run:
+#   gh workflow run soak.yml -f minutes=10 -f jobs=0     # smoke test
+#   gh workflow run soak.yml -f minutes=358 -f jobs=1    # one slice
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "minutes to run in this slice (<= 358)"
+        required: false
+        default: "358"
+      jobs:
+        description: "real jobs to create during the slice (0 = none)"
+        required: false
+        default: "0"
+      restart_every_min:
+        description: "SIGKILL + restart the controller every N minutes (0 = never)"
+        required: false
+        default: "90"
+  # schedule:
+  #   - cron: "5 */6 * * *"
+
+permissions:
+  contents: read
+  # Needed for the controller's workflow_dispatch, which is the one event GitHub
+  # allows GITHUB_TOKEN to create. Nothing else is granted.
+  actions: write
+
+concurrency:
+  group: soak
+  cancel-in-progress: false
+
+jobs:
+  soak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: restore soak state
+        uses: actions/cache@v4
+        with:
+          path: |
+            runs/soak-cloud/state.json
+            runs/soak-cloud/controller.db
+            runs/soak-cloud/controller.db-wal
+            runs/soak-cloud/controller.db-shm
+          key: soak-${{ github.run_id }}
+          restore-keys: soak-
+      - name: run a soak slice
+        env:
+          OC24_GITHUB_TOKEN: ${{ github.token }}
+          OC24_REPO: ${{ github.repository }}
+        run: |
+          node tools/soak.mjs \
+            --minutes "${{ inputs.minutes || '358' }}" \
+            --out runs/soak-cloud \
+            --state runs/soak-cloud/state.json \
+            --restart-every-min "${{ inputs.restart_every_min || '90' }}" \
+            --jobs "${{ inputs.jobs || '0' }}" \
+            --label "github:${{ github.run_id }}"
+      - name: save soak state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            runs/soak-cloud/state.json
+            runs/soak-cloud/controller.db
+            runs/soak-cloud/controller.db-wal
+            runs/soak-cloud/controller.db-shm
+          key: soak-${{ github.run_id }}
+      - name: upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-evidence-${{ github.run_id }}
+          path: runs/soak-cloud
+          if-no-files-found: warn
+          retention-days: 30

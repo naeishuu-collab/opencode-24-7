@@ -27,9 +27,17 @@ export function workerConfig(env) {
     ref: env.OC24_REF ?? "main",
     workflow: env.OC24_WORKFLOW ?? "agent-job.yml",
     controllerUrl: env.OC24_CONTROLLER_URL || null,
+    agent: env.OC24_AGENT ?? "opencode",
+    goalKey: env.OC24_GOAL_KEY || null,
+    eventRetentionDays: clampInt(env.OC24_EVENT_RETENTION_DAYS, 0, 3650, 30),
+    goalRetentionDays: clampInt(env.OC24_GOAL_RETENTION_DAYS, 0, 3650, 0),
     maxJobsPerDay: clampInt(env.OC24_MAX_JOBS_PER_DAY, 1, 500, 50),
     maxDispatchPerDay: clampInt(env.OC24_MAX_DISPATCH_PER_DAY, 1, 200, 20),
     maxConcurrent: clampInt(env.OC24_MAX_CONCURRENT, 1, 10, 2),
+    // D1 free allows 50 queries per invocation: a cron tick must stay well under
+    // it, so the cloud defaults poll fewer runs and dispatch one job per tick.
+    maxPollsPerTick: clampInt(env.OC24_MAX_POLLS_PER_TICK, 1, 20, 5),
+    maxDispatchesPerTick: clampInt(env.OC24_MAX_DISPATCHES_PER_TICK, 1, 5, 1),
     maxCostUsd: Number(env.OC24_MAX_COST_USD ?? 0),
     leaseSec: clampInt(env.OC24_LEASE_SEC, 60, 86400, 900),
     noRunGraceSec: clampInt(env.OC24_NO_RUN_GRACE_SEC, 300, 86400, 1800),
@@ -39,9 +47,17 @@ export function workerConfig(env) {
 
 export async function buildWorkerApp(env, { fetchImpl = globalThis.fetch } = {}) {
   const config = workerConfig(env);
+  if (config.goalKey && config.goalKey.length < 16) {
+    // Same fail-closed rule as the Node server: never encrypt with a weak key.
+    throw new Error("OC24_GOAL_KEY must be at least 16 characters");
+  }
   const store = await createStore(createD1Executor(env.DB)).init();
   const github = createGithub({ token: config.githubToken, repo: config.repo, fetchImpl });
-  const engine = createEngine({ store, github, config });
+  const engine = createEngine({
+    store,
+    github,
+    config: { ...config, defaultAgent: config.agent, defaultWorkflow: config.workflow },
+  });
   const app = createApp({
     store,
     engine,
@@ -67,7 +83,15 @@ export default {
   async scheduled(event, env) {
     const { engine } = await get(env);
     const out = await engine.tick();
-    console.log(JSON.stringify({ cron: event.cron, at: out.at, dispatched: out.dispatched.length, finalized: out.finalized.length }));
+    console.log(
+      JSON.stringify({
+        cron: event.cron,
+        at: out.at,
+        dispatched: out.dispatched.length,
+        finalized: out.finalized.length,
+        pruned_events: out.maintenance?.pruned_events ?? 0,
+      }),
+    );
     return out;
   },
 };

@@ -11,6 +11,12 @@ const STATE_FILTERS = ["all", "queued", "awaiting_approval", "running", "unknown
 const state = {
   signedIn: false,
   filter: "all",
+  q: "",
+  offset: 0,
+  total: 0,
+  pageSize: 50,
+  hasMore: false,
+  agents: [],
   jobs: [],
   selected: null,
   config: null,
@@ -130,6 +136,7 @@ function renderFilters() {
     b.type = "button";
     b.addEventListener("click", () => {
       state.filter = name;
+      state.offset = 0;
       renderFilters();
       refresh().catch((e) => setConn(false, e.message));
     });
@@ -149,6 +156,8 @@ function renderStats(stats) {
     ["失敗", byState.failed ?? 0],
     ["本日のジョブ", stats.jobsToday ?? 0],
     ["本日のdispatch", `${stats.dispatchesToday ?? 0}/${stats.caps?.max_dispatch_per_day ?? "?"}`],
+    ["イベント保存", stats.events?.count ?? 0],
+    ["Goal 保存", stats.goal_storage === "encrypted" ? "暗号化" : "平文"],
     ["GitHubトークン", stats.github_token === "configured" ? "設定済み" : "未設定(dispatch不可)"],
   ];
   for (const [label, value] of cells) {
@@ -157,7 +166,7 @@ function renderStats(stats) {
     card.appendChild(el("span", null, label));
     body.appendChild(card);
   }
-  $("footer-config").textContent = `${stats.repo} · ${stats.workflow}@${stats.ref} · 同時実行上限 ${stats.caps?.max_concurrent ?? "?"} · コスト上限 $${stats.caps?.max_cost_usd ?? "?"} · コールバックURL ${stats.controller_url ?? "未設定"}`;
+  $("footer-config").textContent = `${stats.repo} · ${stats.workflow}@${stats.ref} · 同時実行上限 ${stats.caps?.max_concurrent ?? "?"} · コスト上限 $${stats.caps?.max_cost_usd ?? "?"} · イベント保持 ${stats.retention?.events_days ?? "?"}日 · コールバックURL ${stats.controller_url ?? "未設定"}`;
 }
 
 function jobRow(job) {
@@ -166,6 +175,7 @@ function jobRow(job) {
   const middle = el("div");
   middle.appendChild(el("div", "goal", job.goal));
   const bits = [
+    job.agent ?? "opencode",
     job.model,
     `試行 ${job.attempt_count}/${job.max_attempts}`,
     job.cost_usd ? `$${job.cost_usd}` : "$0",
@@ -284,6 +294,7 @@ async function showDetail(id) {
       kv([
         ["状態", pill(job.state)],
         ["ゴール", job.goal],
+        ["エージェント", job.agent ?? "opencode"],
         ["モデル", job.model],
         ["検証コマンド", job.verify_cmd],
         ["タイムアウト", `${job.timeout_sec}秒`],
@@ -349,15 +360,58 @@ async function showDetail(id) {
 
 function renderConfig(config) {
   state.config = config;
+  state.agents = (config.agents ?? []).length
+    ? config.agents
+    : [
+        {
+          id: "opencode",
+          label: "OpenCode",
+          available: true,
+          models: config.free_models ?? [],
+        },
+      ];
+
+  // Rebuild only when the data changed: a 5 s poll must not reset a choice the
+  // user is in the middle of making.
+  const agentSelect = $("agent");
+  const signature = state.agents.map((a) => `${a.id}:${a.available}:${(a.models ?? []).length}`).join("|");
+  if (agentSelect.dataset.signature !== signature) {
+    const previous = agentSelect.value;
+    agentSelect.textContent = "";
+    for (const agent of state.agents) {
+      const option = el("option", null, agent.available ? agent.label : `${agent.label}（未対応）`);
+      option.value = agent.id;
+      option.disabled = !agent.available;
+      if (agent.reason) option.title = agent.reason;
+      agentSelect.appendChild(option);
+    }
+    const keep = state.agents.find((a) => a.id === previous && a.available);
+    const first = state.agents.find((a) => a.available);
+    if (keep) agentSelect.value = keep.id;
+    else if (first) agentSelect.value = first.id;
+    agentSelect.dataset.signature = signature;
+    renderModelOptions();
+  }
+}
+
+function renderModelOptions() {
+  const agent = state.agents.find((a) => a.id === $("agent").value);
+  const models = agent?.models ?? [];
   const select = $("model");
   const previous = select.value;
   select.textContent = "";
-  for (const model of config.free_models ?? []) {
+  for (const model of models) {
     const option = el("option", null, model);
     option.value = model;
     select.appendChild(option);
   }
-  if (previous && (config.free_models ?? []).includes(previous)) select.value = previous;
+  if (previous && models.includes(previous)) select.value = previous;
+  if (!models.length) {
+    const option = el("option", null, "無料モデルの allowlist がありません");
+    option.value = "";
+    option.disabled = true;
+    select.appendChild(option);
+  }
 }
 
 async function createJob(event) {
@@ -365,6 +419,7 @@ async function createJob(event) {
   $("job-error").textContent = "";
   const body = {
     goal: $("goal").value.trim(),
+    agent: $("agent").value,
     model: $("model").value,
     verify_cmd: $("verify").value.trim() || null,
     timeout_sec: Number($("timeout").value),
@@ -383,13 +438,33 @@ async function createJob(event) {
   }
 }
 
+function renderPager() {
+  const from = state.total === 0 ? 0 : state.offset + 1;
+  const to = state.offset + state.jobs.length;
+  $("page-info").textContent = `${from}-${to} / ${state.total} 件`;
+  $("prev-page").disabled = state.offset <= 0;
+  $("next-page").disabled = !state.hasMore;
+}
+
 async function refresh() {
   if (!state.signedIn) return;
-  const params = state.filter === "all" ? "" : `?state=${encodeURIComponent(state.filter)}`;
-  const [stats, list, config] = await Promise.all([api("/api/stats"), api(`/api/jobs${params}`), api("/api/config")]);
+  const params = new URLSearchParams();
+  if (state.filter !== "all") params.set("state", state.filter);
+  if (state.q) params.set("q", state.q);
+  params.set("limit", String(state.pageSize));
+  params.set("offset", String(state.offset));
+  const [stats, list, config] = await Promise.all([api("/api/stats"), api(`/api/jobs?${params}`), api("/api/config")]);
   state.jobs = list.jobs;
+  state.total = list.total ?? list.jobs.length;
+  state.hasMore = Boolean(list.has_more);
+  if (!state.jobs.length && state.offset > 0) {
+    // The page emptied under us (jobs pruned or filter changed): step back once.
+    state.offset = Math.max(0, state.offset - state.pageSize);
+    return refresh();
+  }
   renderStats(stats);
   renderJobs();
+  renderPager();
   renderConfig(config);
   state.lastUpdated = new Date();
   setConn(true, `最終更新 ${state.lastUpdated.toLocaleTimeString()}`);
@@ -422,6 +497,25 @@ function init() {
   });
   $("logout").addEventListener("click", logout);
   $("job-form").addEventListener("submit", createJob);
+  $("agent").addEventListener("change", renderModelOptions);
+  let searchTimer = null;
+  $("search").addEventListener("input", () => {
+    clearTimeout(searchTimer);
+    // Debounce: one request after the typing stops, not one per keystroke.
+    searchTimer = setTimeout(() => {
+      state.q = $("search").value.trim();
+      state.offset = 0;
+      refresh().catch((e) => setConn(false, e.message));
+    }, 300);
+  });
+  $("prev-page").addEventListener("click", () => {
+    state.offset = Math.max(0, state.offset - state.pageSize);
+    refresh().catch((e) => setConn(false, e.message));
+  });
+  $("next-page").addEventListener("click", () => {
+    state.offset += state.pageSize;
+    refresh().catch((e) => setConn(false, e.message));
+  });
   $("close-detail").addEventListener("click", () => {
     $("detail").classList.add("hidden");
     state.selected = null;

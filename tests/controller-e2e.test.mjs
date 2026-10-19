@@ -480,5 +480,14 @@ test("the store runs through the D1 executor call shape (Cloudflare path)", asyn
   assert.equal(attempt.state, "succeeded");
   assert.equal(JSON.parse(attempt.metrics).source, "artifact-verified");
   assert.equal((await store.stats()).jobsByState.succeeded, 1);
+
+  // Phase 2E statements must also work through the D1 call shape: search with
+  // LIKE ... ESCAPE, the agent column and batched event retention.
+  assert.equal(job.agent, "opencode");
+  assert.equal((await store.listJobs({ q: "d1 backed", limit: 10, offset: 0 })).length, 1);
+  assert.equal(await store.countJobs({ q: "d1 backed" }), 1);
+  await store.appendEvent({ kind: "ancient", at: "2020-01-01T00:00:00Z" });
+  assert.equal(await store.pruneEvents({ olderThan: "2021-01-01T00:00:00Z" }), 1);
+  assert.ok((await store.eventStats()).count >= 1);
   await fake.close();
 });

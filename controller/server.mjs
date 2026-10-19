@@ -23,6 +23,10 @@ const ROOT = path.resolve(HERE, "..");
 export function loadConfig(env = process.env) {
   const freeModels = JSON.parse(fs.readFileSync(path.join(ROOT, "runner", "config", "free-models.json"), "utf8")).models;
   const repo = env.OC24_REPO ?? "naeishuu-collab/opencode-24-7";
+  const goalKey = env.OC24_GOAL_KEY || null;
+  if (goalKey && goalKey.length < 16) {
+    throw new Error("OC24_GOAL_KEY must be at least 16 characters (refusing to start with a weak goal key)");
+  }
   return {
     adminToken: env.OC24_ADMIN_TOKEN ?? null,
     githubToken: env.OC24_GITHUB_TOKEN ?? null,
@@ -30,7 +34,11 @@ export function loadConfig(env = process.env) {
     repo,
     ref: env.OC24_REF ?? "main",
     workflow: env.OC24_WORKFLOW ?? "agent-job.yml",
+    agent: env.OC24_AGENT ?? "opencode",
     controllerUrl: env.OC24_CONTROLLER_URL || null,
+    goalKey,
+    eventRetentionDays: clampInt(env.OC24_EVENT_RETENTION_DAYS, 0, 3650, 30),
+    goalRetentionDays: clampInt(env.OC24_GOAL_RETENTION_DAYS, 0, 3650, 0),
     dbPath: env.OC24_DB_PATH ?? path.join(ROOT, "controller", "data", "controller.db"),
     host: env.OC24_HOST ?? "127.0.0.1",
     port: clampInt(env.OC24_PORT, 0, 65535, 8787),
@@ -39,6 +47,8 @@ export function loadConfig(env = process.env) {
     maxJobsPerDay: clampInt(env.OC24_MAX_JOBS_PER_DAY, 1, 500, 50),
     maxDispatchPerDay: clampInt(env.OC24_MAX_DISPATCH_PER_DAY, 1, 200, 20),
     maxConcurrent: clampInt(env.OC24_MAX_CONCURRENT, 1, 10, 2),
+    maxPollsPerTick: clampInt(env.OC24_MAX_POLLS_PER_TICK, 1, 50, 10),
+    maxDispatchesPerTick: clampInt(env.OC24_MAX_DISPATCHES_PER_TICK, 1, 10, 2),
     maxCostUsd: Number(env.OC24_MAX_COST_USD ?? 0),
     leaseSec: clampInt(env.OC24_LEASE_SEC, 60, 86400, 900),
     noRunGraceSec: clampInt(env.OC24_NO_RUN_GRACE_SEC, 300, 86400, 1800),
@@ -59,6 +69,10 @@ export function summarizeConfig(config) {
     tick_seconds: config.tickSeconds,
     admin_token: config.adminToken ? "configured" : "MISSING (server will refuse to start)",
     github_token: config.githubToken ? "configured" : "missing (dispatch disabled, jobs stay queued)",
+    goal_key: config.goalKey ? "configured (goals encrypted at rest)" : "missing (goals stored as plain text)",
+    agent: config.agent,
+    retention: { events_days: config.eventRetentionDays, goals_days: config.goalRetentionDays },
+    tick_limits: { polls: config.maxPollsPerTick, dispatches: config.maxDispatchesPerTick },
     caps: {
       jobs_per_day: config.maxJobsPerDay,
       dispatches_per_day: config.maxDispatchPerDay,
@@ -93,6 +107,12 @@ export async function buildController(config = loadConfig(), { fetchImpl = globa
       controllerUrl: config.controllerUrl,
       leaseSec: config.leaseSec,
       noRunGraceSec: config.noRunGraceSec,
+      defaultAgent: config.agent,
+      goalKey: config.goalKey,
+      eventRetentionDays: config.eventRetentionDays,
+      goalRetentionDays: config.goalRetentionDays,
+      maxPollsPerTick: config.maxPollsPerTick,
+      maxDispatchesPerTick: config.maxDispatchesPerTick,
     },
   });
   const assets = {

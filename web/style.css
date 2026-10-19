@@ -111,6 +111,10 @@ input, textarea, select {
 .filters { display: flex; gap: 6px; flex-wrap: wrap; }
 .filters button { background: transparent; color: var(--muted); border-color: var(--border); }
 .filters button.active { color: var(--text); border-color: var(--accent-2); }
+.search-row { margin-bottom: 12px; }
+.search-row input { max-width: 320px; }
+.search-row .spacer { flex: 1 1 auto; }
+#page-info { white-space: nowrap; }
 
 .job-list { display: grid; gap: 8px; margin-top: 12px; }
 .job {

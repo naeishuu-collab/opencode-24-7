@@ -45,6 +45,10 @@
           </label>
           <div class="grid">
             <label class="block">
+              <span>エージェント</span>
+              <select id="agent"></select>
+            </label>
+            <label class="block">
               <span>モデル（無料枠のみ）</span>
               <select id="model"></select>
             </label>
@@ -76,6 +80,13 @@
         <div class="card-head">
           <h2>ジョブ</h2>
           <div id="filters" class="filters"></div>
+        </div>
+        <div class="row search-row">
+          <input id="search" type="search" placeholder="検索（ID / ゴール）" autocomplete="off" />
+          <span id="page-info" class="muted"></span>
+          <span class="spacer"></span>
+          <button id="prev-page" type="button" class="ghost" disabled>前へ</button>
+          <button id="next-page" type="button" class="ghost" disabled>次へ</button>
         </div>
         <div id="job-list" class="job-list"></div>
       </section>

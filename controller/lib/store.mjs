@@ -24,6 +24,7 @@ const SCHEMA = [
      repo TEXT NOT NULL,
      ref TEXT NOT NULL,
      workflow TEXT NOT NULL,
+     agent TEXT NOT NULL DEFAULT 'opencode',
      allow_external INTEGER NOT NULL DEFAULT 0,
      approved_at TEXT,
      approved_by TEXT,
@@ -89,6 +90,16 @@ const SCHEMA = [
   `CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs (state, created_at)`,
 ];
 
+// Numbered, idempotent migrations for databases created by an older version.
+// New databases already have every column, so each ALTER is allowed to fail
+// with "duplicate column name" and is otherwise fatal.
+const MIGRATIONS = [
+  {
+    version: 2,
+    statements: [`ALTER TABLE jobs ADD COLUMN agent TEXT NOT NULL DEFAULT 'opencode'`],
+  },
+];
+
 const JOB_COLUMNS = new Set([
   "updated_at", "state", "cancel_requested", "attempt_count", "cost_usd", "tokens_total",
   "run_id", "run_url", "artifact_name", "verification", "last_error", "finished_at",
@@ -101,6 +112,33 @@ const ATTEMPT_COLUMNS = new Set([
   "metrics", "error",
 ]);
 
+function likePattern(value) {
+  return `%${String(value).replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+}
+
+// One WHERE builder for list and count so a page and its total always agree.
+function jobWhere({ state = null, states = null, q = null, before = null } = {}) {
+  const where = [];
+  const params = [];
+  if (states?.length) {
+    where.push(`state IN (${states.map(() => "?").join(", ")})`);
+    params.push(...states);
+  } else if (state) {
+    where.push(`state = ?`);
+    params.push(state);
+  }
+  if (q) {
+    // D1 caps LIKE patterns at 50 bytes; the API truncates q before it gets here.
+    where.push(`(id LIKE ? ESCAPE '\\' OR goal LIKE ? ESCAPE '\\')`);
+    params.push(likePattern(q), likePattern(q));
+  }
+  if (before) {
+    where.push(`created_at < ?`);
+    params.push(before);
+  }
+  return { sql: where.length ? ` WHERE ${where.join(" AND ")}` : "", params };
+}
+
 function setClause(patch, allowed) {
   const keys = Object.keys(patch).filter((k) => allowed.has(k));
   if (!keys.length) return null;
@@ -111,19 +149,37 @@ export function createStore(exec, { now = () => new Date().toISOString() } = {})
   const store = {
     async init() {
       for (const sql of SCHEMA) await exec.exec(sql);
-      const version = await exec.get(`SELECT v FROM meta WHERE k = 'schema'`);
-      if (!version) await exec.run(`INSERT INTO meta (k, v) VALUES ('schema', ?)`, ["1"]);
+      let version = Number((await exec.get(`SELECT v FROM meta WHERE k = 'schema'`))?.v ?? 0);
+      if (!version) {
+        await exec.run(`INSERT INTO meta (k, v) VALUES ('schema', ?)`, ["1"]);
+        version = 1;
+      }
+      for (const migration of MIGRATIONS) {
+        if (migration.version <= version) continue;
+        for (const sql of migration.statements) {
+          try {
+            await exec.exec(sql);
+          } catch (e) {
+            if (!/duplicate column name|already exists/i.test(String(e?.message ?? e))) throw e;
+          }
+        }
+        await exec.run(`INSERT INTO meta (k, v) VALUES ('schema', ?) ON CONFLICT (k) DO UPDATE SET v = ?`, [
+          String(migration.version),
+          String(migration.version),
+        ]);
+        version = migration.version;
+      }
       return store;
     },
 
     async createJob(job) {
       await exec.run(
         `INSERT INTO jobs (id, created_at, updated_at, state, goal, verify_cmd, model, timeout_sec,
-           max_attempts, repo, ref, workflow, allow_external, attempt_count, cost_usd, tokens_total, cancel_requested)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0)`,
+           max_attempts, repo, ref, workflow, agent, allow_external, attempt_count, cost_usd, tokens_total, cancel_requested)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0)`,
         [
           job.id, job.created_at, job.created_at, job.state, job.goal, job.verify_cmd ?? null, job.model,
-          job.timeout_sec, job.max_attempts, job.repo, job.ref, job.workflow,
+          job.timeout_sec, job.max_attempts, job.repo, job.ref, job.workflow, job.agent ?? "opencode",
           job.allow_external ? 1 : 0,
         ],
       );
@@ -134,32 +190,23 @@ export function createStore(exec, { now = () => new Date().toISOString() } = {})
       return (await exec.get(`SELECT * FROM jobs WHERE id = ?`, [id])) ?? null;
     },
 
-    async listJobs({ state = null, limit = 50, offset = 0, states = null } = {}) {
-      if (states?.length) {
-        const holes = states.map(() => "?").join(", ");
-        return exec.all(
-          `SELECT * FROM jobs WHERE state IN (${holes}) ORDER BY created_at DESC LIMIT ? OFFSET ?`,
-          [...states, limit, offset],
-        );
-      }
-      if (state) {
-        return exec.all(`SELECT * FROM jobs WHERE state = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`, [state, limit, offset]);
-      }
-      return exec.all(`SELECT * FROM jobs ORDER BY created_at DESC LIMIT ? OFFSET ?`, [limit, offset]);
+    async listJobs({ state = null, limit = 50, offset = 0, states = null, q = null, before = null } = {}) {
+      const where = jobWhere({ state, states, q, before });
+      return exec.all(
+        `SELECT * FROM jobs${where.sql} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+        [...where.params, limit, offset],
+      );
     },
 
-    async countJobs({ states = null, since = null } = {}) {
-      const where = [];
-      const params = [];
-      if (states?.length) {
-        where.push(`state IN (${states.map(() => "?").join(", ")})`);
-        params.push(...states);
-      }
+    async countJobs({ states = null, since = null, state = null, q = null, before = null } = {}) {
+      const where = jobWhere({ state, states, q, before });
+      const params = [...where.params];
+      let sql = where.sql;
       if (since) {
-        where.push(`created_at >= ?`);
+        sql += sql ? " AND created_at >= ?" : " WHERE created_at >= ?";
         params.push(since);
       }
-      const row = await exec.get(`SELECT COUNT(*) AS n FROM jobs${where.length ? ` WHERE ${where.join(" AND ")}` : ""}`, params);
+      const row = await exec.get(`SELECT COUNT(*) AS n FROM jobs${sql}`, params);
       return Number(row?.n ?? 0);
     },
 
@@ -241,6 +288,37 @@ export function createStore(exec, { now = () => new Date().toISOString() } = {})
       return exec.all(`SELECT * FROM events WHERE seq > ? ORDER BY seq ASC LIMIT ?`, [since_seq, limit]);
     },
 
+    async eventStats() {
+      const row = await exec.get(`SELECT COUNT(*) AS n, MIN(at) AS oldest, MAX(at) AS newest FROM events`);
+      return { count: Number(row?.n ?? 0), oldest: row?.oldest ?? null, newest: row?.newest ?? null };
+    },
+
+    // Retention: delete in bounded batches. D1 asks large DELETEs to be chunked
+    // (a single statement touching hundreds of thousands of rows hits limits).
+    async pruneEvents({ olderThan, batch = 500, batches = 4 } = {}) {
+      let total = 0;
+      for (let i = 0; i < batches; i++) {
+        const r = await exec.run(
+          `DELETE FROM events WHERE seq IN (SELECT seq FROM events WHERE at < ? LIMIT ?)`,
+          [olderThan, batch],
+        );
+        total += r.changes;
+        if (r.changes < batch) break;
+      }
+      return total;
+    },
+
+    // Goals are the only free text in the store; optional pruning keeps them out
+    // of long-lived databases once the job is finished.
+    async pruneGoals({ olderThan, batch = 200 } = {}) {
+      const r = await exec.run(
+        `UPDATE jobs SET goal = '[pruned]'
+         WHERE id IN (SELECT id FROM jobs WHERE finished_at IS NOT NULL AND finished_at < ? AND goal <> '[pruned]' LIMIT ?)`,
+        [olderThan, batch],
+      );
+      return r.changes;
+    },
+
     async bumpCounter(name, delta = 1, day = dayKey(now())) {
       await exec.run(
         `INSERT INTO counters (day, name, value) VALUES (?, ?, ?)
@@ -284,7 +362,8 @@ export function createStore(exec, { now = () => new Date().toISOString() } = {})
     },
 
     async deleteExpiredSessions(at = now()) {
-      await exec.run(`DELETE FROM sessions WHERE expires_at < ?`, [at]);
+      const r = await exec.run(`DELETE FROM sessions WHERE expires_at < ?`, [at]);
+      return r.changes;
     },
 
     async stats(at = now()) {

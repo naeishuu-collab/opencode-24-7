@@ -30,3 +30,4 @@ jobs:
       # worker.mjs imports dashboard assets as text and is only bundled by
       # wrangler, so node cannot load it - a syntax check is what CI can prove.
       - run: node --check controller/worker.mjs
+      - run: node --check tools/soak.mjs

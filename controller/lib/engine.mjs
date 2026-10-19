@@ -12,6 +12,8 @@
 import { addSeconds, clampInt, dayKey, hexEquals, newAttemptId, newJobId, nowIso, randHex, redact, sha256Hex, truncate } from "./util.mjs";
 import { GithubError, KIND_PERMANENT, KIND_RATE_LIMITED } from "./github.mjs";
 import { readZipEntries } from "./zip.mjs";
+import { AGENTS, getAgent, modelsFor } from "./agents.mjs";
+import { openText, sealText } from "./secretbox.mjs";
 
 export const JOB = {
   awaiting: "awaiting_approval",
@@ -43,17 +45,29 @@ const SUMMARY_MAX = 4000;
 // clock skew between this controller and GitHub; it cannot match a stale run.
 const MARKER_LOOKBACK_SEC = 3600;
 
-export function validateJobSpec(spec, { freeModels }) {
+export function validateJobSpec(spec, { freeModels, agents = AGENTS, defaultAgent = "opencode" }) {
   const bad = (code, message) => ({ ok: false, code, message });
   if (!spec || typeof spec !== "object") return bad("invalid", "body must be a JSON object");
   const goal = typeof spec.goal === "string" ? spec.goal.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "").trim() : "";
   if (goal.length < 3) return bad("invalid-goal", "goal must be at least 3 characters");
   if (goal.length > GOAL_MAX) return bad("invalid-goal", `goal must be at most ${GOAL_MAX} characters`);
 
+  // Fail closed: an unknown or not-yet-available agent is rejected here, not
+  // discovered at dispatch time.
+  const agentId = typeof spec.agent === "string" && spec.agent.trim() ? spec.agent.trim() : defaultAgent;
+  const agent = getAgent(agentId);
+  if (!agent) return bad("agent-not-found", `agent "${agentId}" is not known to this controller`);
+  if (!agent.available) return bad("agent-unavailable", `agent "${agent.id}" is defined but not available yet${agent.reason ? `: ${agent.reason}` : ""}`);
+
   const model = typeof spec.model === "string" ? spec.model.trim() : "";
   if (!model) return bad("invalid-model", "model is required");
-  if (!freeModels.has(model)) {
-    return bad("model-not-allowlisted", `model "${model}" is not on the verified-free allowlist (runner/config/free-models.json)`);
+  const allowed = new Set(modelsFor(agent, { freeModels }));
+  if (!allowed.size) return bad("model-not-allowlisted", `agent "${agent.id}" has no verified-free model allowlist`);
+  if (!allowed.has(model)) {
+    return bad(
+      "model-not-allowlisted",
+      `model "${model}" is not on the verified-free allowlist for ${agent.label} (runner/config/free-models.json)`,
+    );
   }
 
   let verify_cmd = spec.verify_cmd ?? null;
@@ -64,14 +78,17 @@ export function validateJobSpec(spec, { freeModels }) {
     else if (verify_cmd.length > VERIFY_MAX) return bad("invalid-verify", `verify_cmd must be at most ${VERIFY_MAX} characters`);
   }
 
+  const limits = agent.limits ?? { timeoutSecMax: 3600, maxAttempts: 3 };
   return {
     ok: true,
     value: {
       goal,
+      agent: agent.id,
+      workflow: agent.workflow,
       model,
       verify_cmd,
-      timeout_sec: clampInt(spec.timeout_sec, 60, 3600, 1800),
-      max_attempts: clampInt(spec.max_attempts, 1, 3, 1),
+      timeout_sec: clampInt(spec.timeout_sec, 60, limits.timeoutSecMax, 1800),
+      max_attempts: clampInt(spec.max_attempts, 1, limits.maxAttempts, 1),
       // Jobs whose goal implies an external effect (push, PR, deploy) wait for
       // an explicit human approval before they are dispatched.
       allow_external: spec.allow_external === true,
@@ -158,6 +175,11 @@ export function createEngine({ store, github, config, now = () => nowIso() }) {
     noRunGraceSec: config.noRunGraceSec ?? 1800,
     tickLeaseSec: config.tickLeaseSec ?? 60,
     artifactPrefix: config.artifactPrefix ?? "oc24-job-",
+    defaultAgent: config.defaultAgent ?? "opencode",
+    goalKey: config.goalKey ?? null,
+    eventRetentionDays: config.eventRetentionDays ?? 30,
+    goalRetentionDays: config.goalRetentionDays ?? 0,
+    maintenanceSec: config.maintenanceSec ?? 6 * 3600,
   };
 
   const ev = (kind, { job_id = null, attempt_id = null, message = null, data = null, at = now() } = {}) =>
@@ -181,21 +203,22 @@ export function createEngine({ store, github, config, now = () => nowIso() }) {
       id: newJobId(),
       created_at: at,
       state: v.value.allow_external ? JOB.awaiting : JOB.queued,
-      goal: v.value.goal,
+      goal: await sealText(cfg.goalKey, v.value.goal),
       verify_cmd: v.value.verify_cmd,
       model: v.value.model,
       timeout_sec: v.value.timeout_sec,
       max_attempts: v.value.max_attempts,
       repo: cfg.repo,
       ref: cfg.ref,
-      workflow: cfg.workflow,
+      workflow: v.value.agent === cfg.defaultAgent ? cfg.workflow : v.value.workflow,
+      agent: v.value.agent,
       allow_external: v.value.allow_external,
     });
     await store.bumpCounter("job", 1, dayKey(at));
     await ev(v.value.allow_external ? "job-awaiting-approval" : "job-created", {
       job_id: job.id,
       message: `created by ${actor}`,
-      data: { model: job.model, verify: job.verify_cmd, allow_external: v.value.allow_external },
+      data: { agent: job.agent, model: job.model, verify: job.verify_cmd, allow_external: v.value.allow_external },
     });
     const created = await store.getJob(job.id);
     return { ok: true, job: created };
@@ -697,6 +720,34 @@ export function createEngine({ store, github, config, now = () => nowIso() }) {
     }
   }
 
+  // Retention housekeeping. Runs from the same tick loop (Node interval and
+  // Cloudflare cron), at most once per maintenanceSec, and never deletes a job:
+  // events age out, finished goals can be scrubbed, sessions expire.
+  async function maintenance({ at = now() } = {}) {
+    const out = { at, pruned_events: 0, pruned_goals: 0, pruned_sessions: 0, skipped: null };
+    const last = await store.getMeta("last_maintenance_at");
+    if (last && addSeconds(last, cfg.maintenanceSec) > at) {
+      out.skipped = `last run ${last}`;
+      return out;
+    }
+    await store.setMeta("last_maintenance_at", at);
+    out.pruned_sessions = await store.deleteExpiredSessions(at);
+    if (cfg.eventRetentionDays > 0) {
+      out.pruned_events = await store.pruneEvents({ olderThan: addSeconds(at, -cfg.eventRetentionDays * 86400) });
+    }
+    if (cfg.goalRetentionDays > 0) {
+      out.pruned_goals = await store.pruneGoals({ olderThan: addSeconds(at, -cfg.goalRetentionDays * 86400) });
+    }
+    await ev("maintenance", {
+      at,
+      message: `pruned ${out.pruned_events} events, ${out.pruned_goals} goals, ${out.pruned_sessions} sessions`,
+      data: out,
+    });
+    return out;
+  }
+
+  const openGoal = (job) => openText(cfg.goalKey, job?.goal ?? "");
+
   async function tick({ at = now() } = {}) {
     const held = await store.getMeta("tick_lock_until");
     if (held && held > at) return { at, skipped: "tick-lock", until: held };
@@ -711,6 +762,12 @@ export function createEngine({ store, github, config, now = () => nowIso() }) {
     } finally {
       await store.setMeta("tick_lock_until", "1970-01-01T00:00:00Z");
     }
+    try {
+      const m = await maintenance({ at });
+      if (!m.skipped) out.maintenance = m;
+    } catch (e) {
+      out.notes.push(`maintenance failed: ${redact(e?.message ?? String(e))}`);
+    }
     return out;
   }
 
@@ -722,5 +779,5 @@ export function createEngine({ store, github, config, now = () => nowIso() }) {
     return { job, attempts, events };
   }
 
-  return { config: cfg, createJob, approveJob, requestCancel, resolveUnknown, report, tick, jobView, ev };
+  return { config: cfg, createJob, approveJob, requestCancel, resolveUnknown, report, tick, maintenance, openGoal, jobView, ev };
 }

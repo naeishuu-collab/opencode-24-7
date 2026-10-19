@@ -6,11 +6,24 @@
 // needs a session except /api/session, /healthz and the per-attempt report
 // endpoint (which uses the attempt token and is advisory only).
 import { dayKey, errorResponse, jsonResponse, nowIso, randHex, redact, tokenMatches, truncate } from "./lib/util.mjs";
+import { agentList } from "./lib/agents.mjs";
 
 export const SESSION_COOKIE = "oc24_session";
 const SESSION_TTL_SEC = 12 * 3600;
 const LOGIN_MAX_PER_HOUR = 10;
 const BODY_MAX_BYTES = 64 * 1024;
+
+// D1 caps LIKE patterns at 50 bytes, so keep the term well under that (the two
+// surrounding "%" are part of the pattern). Never let a long term become an
+// error in the cloud.
+function searchTerm(raw) {
+  if (!raw) return null;
+  const clean = String(raw).replace(/[\u0000-\u001f]/g, "").trim();
+  if (!clean) return null;
+  let end = Math.min(clean.length, 64);
+  while (end > 0 && new TextEncoder().encode(clean.slice(0, end)).length > 40) end--;
+  return end > 0 ? clean.slice(0, end) : null;
+}
 
 export function createApp({ store, engine, config, assets = {}, now = () => nowIso() }) {
   const adminToken = config.adminToken ?? null;
@@ -88,16 +101,17 @@ export function createApp({ store, engine, config, assets = {}, now = () => nowI
     }
   }
 
-  function publicJob(job) {
+  function publicJob(job, goal = job.goal) {
     if (!job) return null;
     return {
       id: job.id,
       created_at: job.created_at,
       updated_at: job.updated_at,
       state: job.state,
-      goal: job.goal,
+      goal,
       verify_cmd: job.verify_cmd,
       model: job.model,
+      agent: job.agent ?? "opencode",
       timeout_sec: job.timeout_sec,
       max_attempts: job.max_attempts,
       attempt_count: job.attempt_count,
@@ -150,7 +164,7 @@ export function createApp({ store, engine, config, assets = {}, now = () => nowI
     const parts = path.split("/").filter(Boolean);
 
     if (path === "/healthz") {
-      return jsonResponse({ ok: true, service: "opencode-24-7-controller", time: now(), version: config.version ?? "2d" });
+      return jsonResponse({ ok: true, service: "opencode-24-7-controller", time: now(), version: config.version ?? "2e" });
     }
 
     // ---- attempts report: token auth, advisory only -----------------------
@@ -222,10 +236,24 @@ export function createApp({ store, engine, config, assets = {}, now = () => nowI
     // ---- jobs ------------------------------------------------------------
     if (path === "/api/jobs" && method === "GET") {
       const state = url.searchParams.get("state");
+      const q = searchTerm(url.searchParams.get("q"));
       const limit = Math.min(200, Math.max(1, Number(url.searchParams.get("limit") ?? 50) || 50));
       const offset = Math.max(0, Number(url.searchParams.get("offset") ?? 0) || 0);
-      const jobs = await store.listJobs({ state: state && state !== "all" ? state : null, limit, offset });
-      return jsonResponse({ jobs: jobs.map(publicJob), limit, offset, count: jobs.length });
+      const before = url.searchParams.get("before") || null;
+      const filter = { state: state && state !== "all" ? state : null, q, before, limit, offset };
+      const jobs = await store.listJobs(filter);
+      const total = await store.countJobs(filter);
+      const goals = await Promise.all(jobs.map((job) => engine.openGoal(job)));
+      return jsonResponse({
+        jobs: jobs.map((job, i) => publicJob(job, goals[i])),
+        limit,
+        offset,
+        count: jobs.length,
+        total,
+        has_more: offset + jobs.length < total,
+        state: state ?? "all",
+        q,
+      });
     }
 
     if (path === "/api/jobs" && method === "POST") {
@@ -245,7 +273,7 @@ export function createApp({ store, engine, config, assets = {}, now = () => nowI
         const view = await engine.jobView(id);
         if (!view) return errorResponse(404, "not-found", `no job ${id}`);
         return jsonResponse({
-          job: publicJob(view.job),
+          job: publicJob(view.job, await engine.openGoal(view.job)),
           attempts: view.attempts.map(publicAttempt),
           events: view.events.map((e) => ({
             seq: e.seq,
@@ -287,14 +315,22 @@ export function createApp({ store, engine, config, assets = {}, now = () => nowI
 
     if (path === "/api/stats" && method === "GET") {
       const stats = await store.stats(now());
+      const events = await store.eventStats();
       return jsonResponse({
         ...stats,
+        events,
         caps: {
           max_jobs_per_day: config.maxJobsPerDay,
           max_dispatch_per_day: config.maxDispatchPerDay,
           max_concurrent: config.maxConcurrent,
           max_cost_usd: config.maxCostUsd,
         },
+        retention: {
+          events_days: engine.config.eventRetentionDays,
+          goals_days: engine.config.goalRetentionDays,
+        },
+        goal_storage: engine.config.goalKey ? "encrypted" : "plain",
+        agents: agentList({ freeModels: config.freeModels }),
         repo: config.repo,
         workflow: config.workflow,
         ref: config.ref,
@@ -311,6 +347,8 @@ export function createApp({ store, engine, config, assets = {}, now = () => nowI
         workflow: config.workflow,
         controller_url: config.controllerUrl,
         free_models: config.freeModels,
+        agents: agentList({ freeModels: config.freeModels }),
+        goal_storage: engine.config.goalKey ? "encrypted" : "plain",
         caps: {
           maxJobsPerDay: config.maxJobsPerDay,
           maxDispatchPerDay: config.maxDispatchPerDay,

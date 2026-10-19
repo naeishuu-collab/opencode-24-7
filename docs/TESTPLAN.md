@@ -117,8 +117,8 @@ opt-in because they depend on a model and a network.
 
 | platform | suite (`npm test`) | integration suite |
 | --- | --- | --- |
-| Windows 11, node 24.21.0 | 76 tests: 73 pass, 0 fail, 3 skipped (2 integration + SIGINT cancel) | both tests pass |
-| Ubuntu on WSL2 (Linux 6.18), node 22.22.1 | 76 tests: 73 pass, 0 fail, 3 skipped (integration only) | both tests pass |
+| Windows 11, node 24.21.0 | 87 tests: 84 pass, 0 fail, 3 skipped (2 integration + SIGINT cancel) | both tests pass |
+| Ubuntu on WSL2 (Linux 6.18), node 22.22.1 | 87 tests: 84 pass, 0 fail, 3 skipped (integration only) | both tests pass |
 
 Phase 2D (2026-10-19) added the controller suites to that same command, so the
 numbers above include them: 34 controller unit tests, 9 controller E2E tests
@@ -127,6 +127,15 @@ controller suites were green on both platforms on the first cross-platform run;
 no platform-specific behaviour was found (`node:sqlite`, `DecompressionStream`,
 `AbortSignal.timeout`, `Headers.getSetCookie` all behave the same on Node 22 and
 24).
+
+Phase 2E (2026-10-20) added `tests/phase2e.test.mjs` (11 tests) to the same
+command: agent adapters and their fail-closed paths, the agent recorded on the
+job and exposed by the API, pagination totals, id/goal search with 40-byte
+truncation, event retention and goal pruning, maintenance throttling, encrypted
+goals (ciphertext in the database, plaintext over an authenticated API), the
+wrong/missing-key markers, the <= 45-statement tick (D1 Free allows 50 per
+invocation) and an in-place migration of a Phase 2D database. The suite has no
+network dependency except the loopback fake GitHub server.
 
 ### Cloud runs (public repo `naeishuu-collab/opencode-24-7`, GitHub-hosted runners)
 
@@ -143,6 +152,7 @@ Every real-model run used the free tier only (`--max-cost-usd 0` and
 | `integration` 39250712404 | final revision: both real-model cases green again (fix verified, `git push` denied, `$0`, 23,686 and 17,238 tokens) with the fail-closed scan guard in place |
 | `ci` 39262948350 | Phase 2D at `117594b`: 76 tests green on ubuntu-24.04 and windows-latest (controller suites included) + `node --check controller/worker.mjs` |
 | `agent-job` 39263425059 | **controller-dispatched** (`workflow_dispatch`, 72 s end to end): local controller tick -> dispatch -> run matched by marker -> artifact download -> independent verification -> `succeeded`, 30,836 tokens, $0, `npm test` exit 0, no commit |
+| `agent-job` 39337598363 | Phase 2E soak slice: `tools/soak.mjs` ran the real controller for 6 min with no manual tick, created one job, the controller dispatched this run (marker `oc24-job-20261019T224828Z-96ca-a1-9ad2`), polled it, verified the artifact and marked it `succeeded` - 36,482 tokens, $0, 18/18 samples, all soak invariants green, verdict `pending` (6 of 1440 min) |
 
 The Linux verification found a real bug: opencode resolves its project root from
 the `PWD` environment variable on POSIX, so a forwarded `PWD` made the agent
@@ -185,10 +195,18 @@ suite carries a regression test for it.
 - Integration test 2 depends on the model obeying an explicit instruction to try
   `git push`; a model that refuses on its own would fail the assertion even
   though the policy works. Verify manually if it ever fails.
-- No load/soak test: concurrency, long jobs and artifact growth at scale are
-  unmeasured; the log/patch caps are the only protection today.
-- Phase 2D controller gaps (see `docs/PHASE2D.md` for the full list): the
-  Cloudflare worker, its D1 binding and the 10 ms CPU/request budget are written
-  and unit-tested through the D1 call shape, but never deployed; a cloud runner
-  has never reported back to a controller (needs a public URL); controller events
-  are never pruned; the job goal is stored verbatim (not encrypted at rest).
+- No load/soak test has **completed**: the harness (`tools/soak.mjs`) and the
+  sliced workflow exist and a short smoke run passed, but the 24 h measurement is
+  PENDING until a real 24 h window has elapsed. The 24/7 claim is therefore not
+  made yet.
+- Phase 2E cloud gaps (see `docs/PHASE2E.md`): the Cloudflare worker, its D1
+  binding and the 10 ms CPU/request budget are written and tested through the D1
+  call shape (including the <= 45-statement tick), but never deployed; a cloud
+  runner has never reported back to a controller (needs a public URL); the
+  Cloudflare cron has never fired a real tick.
+- Goal encryption is opt-in (`OC24_GOAL_KEY`); without the key goals are stored
+  as plain text in SQLite/D1. Encrypted goals cannot be searched by text (ids
+  still match), and a lost key makes them unreadable by design.
+- Codex CLI / Claude Code / Gemini CLI are adapter declarations only; their free
+  tier, authentication and terms have not been verified, so they fail closed at
+  job creation.
