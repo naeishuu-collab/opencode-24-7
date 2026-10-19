@@ -30,6 +30,7 @@ opt-in because they depend on a model and a network.
 | redaction | `leaky` + `OC24_TEST_SECRET` | no secret in job.json/summary/diff/logs, `[REDACTED]` present, `redactions > 0` |
 | redaction | `leaky-file` | a secret the agent writes into a workspace file is redacted out of the diff |
 | artifact scanner | `leaky-file` run dir | `tools/scan-run-dir.mjs` exits 1 and names the file; a clean run dir exits 0 |
+| event loss | `burst` (500 lines, immediate exit) | every line is read (the adapter resolves on `close`, the stub writes synchronously) |
 | model allowlist | unlisted model | exit 13 before the agent starts; `--allow-unlisted-model` proceeds but then needs a cost report |
 | cost policy | `nocost`, allowlisted model | exit 0, `costPolicy.costReported=false` recorded; with `--require-cost-report` instead exit 20 |
 | cost policy | `nocost`, `--allow-unlisted-model` | exit 20 (`unknown`), never success: no cost evidence for an unlisted model |
@@ -64,11 +65,11 @@ Every real-model run used the free tier only (`--max-cost-usd 0` and
 | run | what it proved |
 | --- | --- |
 | `ci` 39241810441 | first run: windows-latest found the forward-slash workspace bug (see Known gaps) |
-| `ci` 39243252048, 39247275598 | stub suite green on ubuntu-24.04 and windows-latest after the fixes |
-| `integration` 39246293549 | real model in the cloud: bug fix + real `node --test`, and a real `git push` denied by policy; artifact `oc24-integration-<id>` passed the scan gate and uploaded |
-| `integration` 39247295054 | re-run after the node-test-marker fix: `verify.log` shows the 2 tests really ran (previously the child `node --test` skipped every file and still exited 0) |
-| `agent-job` 39248464928 | self-hosted job: the agent fixed the fixture bug, exactly 1 file changed, 24,989 tokens, $0, verification really ran and passed; the log shows the workflow token has `"push":false`; artifact `oc24-job-<id>` uploaded after a clean scan |
+| `ci` 39243252048, 39247275598, 39250161375 + 2 reruns | stub suite green on ubuntu-24.04 and windows-latest; the last commit was re-run three times to check the event-loss fix |
+| `integration` 39246293549, 39247295054 | real model in the cloud: bug fix + real `node --test`, and a real `git push` denied by policy; artifact `oc24-integration-<id>` passed the scan gate and uploaded. The second run shows the verify tests really running after the node-test-marker fix. |
+| `agent-job` 39248464928, 39250729311 | self-hosted job: the agent fixed the fixture bug, exactly 1 file changed, ~24k tokens, $0, verification really ran and passed; the log shows the workflow token has `"push":false`; artifact `oc24-job-<id>` uploaded after a clean scan |
 | `agent-job` 39248686377 | failure propagation: `--verify-cmd false` -> exit 15 (`verification command exited with code 1`), the run fails, and the artifacts are still uploaded as evidence |
+| `integration` 39250712404 | final revision: both real-model cases green again (fix verified, `git push` denied, `$0`, 23,686 and 17,238 tokens) with the fail-closed scan guard in place |
 
 The Linux verification found a real bug: opencode resolves its project root from
 the `PWD` environment variable on POSIX, so a forwarded `PWD` made the agent
@@ -79,7 +80,7 @@ suite carries a regression test for it.
 
 ## Known gaps
 
-- The first cloud runs (2026-10-19, public repo) found four real bugs. All are
+- The first cloud runs (2026-10-19, public repo) found five real bugs. All are
   fixed and regression tested:
   1. `git rev-parse --show-toplevel` answers with forward-slash paths on
      `windows-latest`, so the raw workspace comparison rejected every job with
@@ -94,6 +95,12 @@ suite carries a regression test for it.
   4. An empty `RUN_BASE` made the artifact scan report "nothing to scan, clean":
      the gate failed open. The scan now refuses an unset, empty or missing run
      directory, and the runner rejects `--run-base ""`.
+  5. The adapter resolved on `exit` and closed readline there, and the stub wrote
+     events asynchronously before `process.exit()`: on a loaded `windows-latest`
+     runner a run that did emit events was read as "produced no events" (exit 20,
+     or worse a wrong verdict). The adapter now resolves on `close` (after the
+     stdio pipes drain) and the stub writes synchronously; a `burst` test asserts
+     every line of a 500-line burst is accounted for.
 - The free models are "free for a limited time". The allowlist carries
   `verifiedAt` (2026-10-18) and needs re-verification when providers change; a
   revoked free model would fail closed with exit 13 until the list is updated.
