@@ -408,6 +408,7 @@ test("invalid arguments exit 13", () => {
   for (const args of [
     [...base, "--model", FREE_MODEL, "--prompt", "x", "--nope"],
     [...base, "--model", FREE_MODEL, "--prompt", "x", "--max-tokens", "abc"],
+    [...base, "--model", FREE_MODEL, "--prompt", "x", "--run-base", ""],
     [...base, "--model", FREE_MODEL],
     [...base, "--prompt", "x"],
   ]) {

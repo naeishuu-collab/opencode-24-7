@@ -81,6 +81,10 @@ function parseArgs(argv) {
     if (takesValue.has(key)) {
       const value = argv[++i];
       if (value === undefined) throw fail("invalid", `missing value for --${key}`);
+      // An empty --run-base would resolve to <cwd> and land the run directory
+      // inside the workspace, where the dirt check then rejects the job with a
+      // misleading "uncommitted changes" error (seen on CI). Refuse it instead.
+      if (value === "" && key === "run-base") throw fail("invalid", "--run-base is empty");
       cfg.values[key] = value;
     } else if (flags.has(key)) {
       cfg.flags.add(key);

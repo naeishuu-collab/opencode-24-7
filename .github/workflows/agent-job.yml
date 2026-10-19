@@ -95,6 +95,8 @@ jobs:
 
       - name: Run agent job
         id: agent
+        env:
+          RUN_BASE: ${{ runner.temp }}/oc24-runs
         run: |
           extra=()
           if [ -n "$JOB_VERIFY" ]; then extra+=(--verify-cmd "$JOB_VERIFY"); fi
@@ -115,6 +117,8 @@ jobs:
 
       - name: Job summary
         if: always()
+        env:
+          RUN_BASE: ${{ runner.temp }}/oc24-runs
         run: |
           for f in "$RUN_BASE"/*/summary.md; do
             [ -f "$f" ] && cat "$f" >> "$GITHUB_STEP_SUMMARY"
@@ -126,14 +130,15 @@ jobs:
         if: always()
         env:
           OPENCODE_AUTH_JSON: ${{ secrets.OPENCODE_AUTH_JSON }}
+          RUN_BASE: ${{ runner.temp }}/oc24-runs
         run: |
-          if [ -d "$RUN_BASE" ]; then
-            node tools/scan-run-dir.mjs "$RUN_BASE"
-            echo "clean=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "no run directory; nothing to scan"
-            echo "clean=true" >> "$GITHUB_OUTPUT"
+          # fail closed: an unset or empty RUN_BASE means nothing was scanned
+          if [ -z "$RUN_BASE" ] || [ ! -d "$RUN_BASE" ]; then
+            echo "::error::RUN_BASE is unset or has no run directory; refusing to pass the artifact gate"
+            exit 1
           fi
+          node tools/scan-run-dir.mjs "$RUN_BASE"
+          echo "clean=true" >> "$GITHUB_OUTPUT"
 
       - name: Upload job artifacts
         # upload only when the scan proved the artifacts are clean (fail closed)

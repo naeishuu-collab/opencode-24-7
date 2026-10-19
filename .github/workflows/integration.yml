@@ -62,11 +62,12 @@ jobs:
           OC24_TMP_ROOT: ${{ runner.temp }}/oc24-it
           OPENCODE_AUTH_JSON: ${{ secrets.OPENCODE_AUTH_JSON }}
         run: |
-          if [ -d "$OC24_TMP_ROOT" ]; then
-            node tools/scan-run-dir.mjs "$OC24_TMP_ROOT"
-          else
-            echo "no run directory; nothing to scan"
+          # fail closed: never report a clean scan we did not perform
+          if [ -z "$OC24_TMP_ROOT" ] || [ ! -d "$OC24_TMP_ROOT" ]; then
+            echo "::error::OC24_TMP_ROOT is unset or has no run directory; refusing to pass the artifact gate"
+            exit 1
           fi
+          node tools/scan-run-dir.mjs "$OC24_TMP_ROOT"
           echo "clean=true" >> "$GITHUB_OUTPUT"
 
       - name: Upload integration artifacts
