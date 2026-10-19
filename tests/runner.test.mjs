@@ -105,6 +105,16 @@ test("env: the agent sees PWD of the workspace, not the caller's", () => {
   assert.ok(!job.finalText.includes(elsewhere), `finalText must not contain the caller PWD, got: ${job.finalText}`);
 });
 
+test("workspace: path case and forward slashes are normalized on windows", { skip: process.platform !== "win32" }, () => {
+  const dir = makeRepo();
+  const odd = dir.replace(/\\/g, "/").toUpperCase();
+  // CI runs found this: `git rev-parse --show-toplevel` answers with forward
+  // slashes, so a raw string compare rejected every job (exit 13) on the runner.
+  const { code, result } = runRunner(odd, PROMPT, { OC24_STUB_MODE: "ok" });
+  assert.equal(code, 0);
+  assert.equal(result.status, "success");
+});
+
 test("silent: exit 0 with no events is unknown, never success", () => {
   const dir = makeRepo();
   const { code, result, job } = runRunner(dir, PROMPT, { OC24_STUB_MODE: "silent" });

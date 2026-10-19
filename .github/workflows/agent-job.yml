@@ -48,7 +48,7 @@ jobs:
       JOB_VERIFY: ${{ inputs.verify_cmd }}
       JOB_TIMEOUT: ${{ inputs.timeout_sec }}
       JOB_ATTEMPTS: ${{ inputs.max_attempts }}
-      RUN_BASE: ${{ runner.temp }}/oc24-runs
+      # RUN_BASE is set per step: the runner context is not available in job-level env
     steps:
       - uses: actions/checkout@v7
 

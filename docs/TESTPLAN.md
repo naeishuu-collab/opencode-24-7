@@ -63,9 +63,15 @@ suite carries a regression test for it.
 
 ## Known gaps
 
-- CI (`.github/workflows/ci.yml`, `integration.yml`, `agent-job.yml`) is written
-  but has never run: no GitHub remote exists yet. Workflow behaviour, the API
-  least-privilege proof and artifact upload are therefore unproven.
+- The first CI run (2026-10-19, public repo) found two real bugs, both fixed and
+  regression tested: `git rev-parse --show-toplevel` answers with forward-slash
+  paths on `windows-latest`, which made the raw workspace comparison reject every
+  job with exit 13 (now a canonical path comparison), and GitHub rejects
+  `${{ runner.temp }}` in a job-level `env:` block ("Unrecognized named-value:
+  'runner'"), which invalidated `agent-job.yml` (RUN_BASE is now set per step).
+- Still unproven on CI after that run: artifact upload and its scan gate, the
+  API least-privilege proof, `opencode auth import` via stdin, and the real-model
+  suites on the hosted runner.
 - The stub cannot represent real provider quirks (partial JSON lines, late cost
   reporting, very large token counts).
 - Integration test 2 depends on the model obeying an explicit instruction to try

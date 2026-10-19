@@ -277,6 +277,24 @@ function isTransient(attempt) {
   return TRANSIENT_STDERR.test(attempt.stderr);
 }
 
+// git on Windows can answer with forward slashes, a short (8.3) name or a
+// different case than our workspace string; compare canonical forms, not strings.
+function samePath(a, b) {
+  const forms = (p) => {
+    const abs = path.resolve(p);
+    const out = new Set([abs]);
+    try {
+      out.add(fs.realpathSync.native(abs));
+    } catch {
+      /* unresolvable path: the absolute form is all we have */
+    }
+    if (process.platform === "win32") for (const v of [...out]) out.add(v.toLowerCase());
+    return out;
+  };
+  const bForms = forms(b);
+  return [...forms(a)].some((v) => bForms.has(v));
+}
+
 async function executeJob(cfg, ctx) {
   const { workspace, runDir, redact, log, jobId } = ctx;
   const v = cfg.values;
@@ -296,7 +314,7 @@ async function executeJob(cfg, ctx) {
   }
   const top = git(workspace, ["rev-parse", "--show-toplevel"]);
   if (top.code !== 0) throw fail("invalid", `not a git repository: ${workspace}`);
-  if (path.resolve(top.stdout.trim()) !== workspace) {
+  if (!samePath(top.stdout.trim(), workspace)) {
     throw fail("invalid", `workspace must be the repository root (got ${top.stdout.trim()})`);
   }
   if (git(workspace, ["rev-parse", "HEAD"]).code !== 0) throw fail("invalid", "repository has no commits");
