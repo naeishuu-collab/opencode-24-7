@@ -1,0 +1,49 @@
+# Cloudflare Workers (free plan) deployment for the 24/7 controller.
+#
+# Not deployed yet: this repository has no Cloudflare account/credentials, so
+# the worker path is implemented and covered by the same tests as the local
+# server, but the real deployment is unverified (docs/PHASE2D.md).
+#
+#   wrangler d1 create oc24-controller      # then paste database_id below
+#   wrangler d1 migrations apply --help     # (schema is created by the app on first use)
+#   wrangler secret put OC24_ADMIN_TOKEN
+#   wrangler secret put OC24_GITHUB_TOKEN
+#   wrangler deploy
+#
+# Free-plan limits that matter (2026-10): 100k requests/day, Cron Triggers
+# included, D1 free tier (5M row reads/day, 100k row writes/day, 5 GB).
+
+name = "oc24-controller"
+main = "controller/worker.mjs"
+compatibility_date = "2025-09-01"
+workers_dev = true
+
+[observability]
+enabled = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "oc24-controller"
+# Replace after `wrangler d1 create oc24-controller` (the id is account-specific).
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+[[rules]]
+type = "Text"
+globs = ["**/*.html", "**/*.css", "**/*.js"]
+fallthrough = true
+
+[triggers]
+# Free plan allows Cron Triggers; every 5 minutes keeps the request count tiny
+# (288/day of the 100k/day free allowance).
+crons = ["*/5 * * * *"]
+
+[vars]
+OC24_REPO = "naeishuu-collab/opencode-24-7"
+OC24_REF = "main"
+OC24_WORKFLOW = "agent-job.yml"
+OC24_MAX_JOBS_PER_DAY = "50"
+OC24_MAX_DISPATCH_PER_DAY = "20"
+OC24_MAX_CONCURRENT = "2"
+OC24_MAX_COST_USD = "0"
+# Set to the deployed URL so runners can post advisory heartbeats:
+# OC24_CONTROLLER_URL = "https://oc24-controller.<account>.workers.dev"

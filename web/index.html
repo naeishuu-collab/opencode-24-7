@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <title>OpenCode 24/7 コントローラ</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="dot" id="conn-dot" aria-hidden="true"></span>
+        <h1>OpenCode 24/7</h1>
+      </div>
+      <div class="topbar-right">
+        <span id="updated" class="muted">未接続</span>
+        <button id="theme-toggle" type="button" class="ghost">テーマ</button>
+        <button id="logout" type="button" class="ghost hidden">サインアウト</button>
+      </div>
+    </header>
+
+    <main>
+      <section id="login" class="card hidden">
+        <h2>サインイン</h2>
+        <p class="muted">コントローラの管理トークン（<code>OC24_ADMIN_TOKEN</code>）を入力してください。トークンはサーバー側のセッション Cookie にのみ保存されます。</p>
+        <div class="row">
+          <input id="token" type="password" placeholder="管理トークン" autocomplete="current-password" />
+          <button id="login-btn" type="button">サインイン</button>
+        </div>
+        <p id="login-error" class="error"></p>
+      </section>
+
+      <section id="stats" class="card hidden">
+        <h2>状態</h2>
+        <div id="stats-body" class="stats"></div>
+      </section>
+
+      <section id="new-job" class="card hidden">
+        <h2>新しいジョブ</h2>
+        <form id="job-form">
+          <label class="block">
+            <span>ゴール（エージェントへの指示）</span>
+            <textarea id="goal" rows="3" required placeholder="例: runner の再試行条件にテストを追加し、npm test を通す"></textarea>
+          </label>
+          <div class="grid">
+            <label class="block">
+              <span>モデル（無料枠のみ）</span>
+              <select id="model"></select>
+            </label>
+            <label class="block">
+              <span>検証コマンド（任意）</span>
+              <input id="verify" placeholder="npm test" />
+            </label>
+            <label class="block">
+              <span>タイムアウト秒</span>
+              <input id="timeout" type="number" min="60" max="3600" value="1800" />
+            </label>
+            <label class="block">
+              <span>最大試行回数</span>
+              <input id="attempts" type="number" min="1" max="3" value="1" />
+            </label>
+          </div>
+          <label class="checkbox">
+            <input id="external" type="checkbox" />
+            <span>外部操作（push / PR / deploy）を伴うゴール → 承認待ちにする</span>
+          </label>
+          <div class="row">
+            <button type="submit">作成</button>
+            <span id="job-error" class="error"></span>
+          </div>
+        </form>
+      </section>
+
+      <section id="jobs" class="card hidden">
+        <div class="card-head">
+          <h2>ジョブ</h2>
+          <div id="filters" class="filters"></div>
+        </div>
+        <div id="job-list" class="job-list"></div>
+      </section>
+
+      <section id="detail" class="card hidden">
+        <div class="card-head">
+          <h2 id="detail-title">ジョブ詳細</h2>
+          <button id="close-detail" type="button" class="ghost">閉じる</button>
+        </div>
+        <div id="detail-body"></div>
+      </section>
+    </main>
+
+    <footer class="muted">
+      <span id="footer-config"></span>
+    </footer>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

@@ -6,12 +6,14 @@ agent change it → verify the change → keep the evidence (log, diff, usage)*.
 It is designed to run on GitHub Actions with **zero dependencies** (Node built-ins
 only) and **zero spend** (free models + `--max-cost-usd 0`).
 
-Status: Phase 2 - the runner, the model/cost policy and the artifact scanner are
+Status: Phase 2D - the runner, the model/cost policy and the artifact scanner are
 implemented and verified on Windows, Linux and **GitHub Actions** (public repo
 [`naeishuu-collab/opencode-24-7`](https://github.com/naeishuu-collab/opencode-24-7);
 stub suite green on ubuntu-24.04 + windows-latest, real free-model runs at $0,
-self-hosted `agent-job` with artifacts and a proven failure path). The Cloudflare
-control plane is not built.
+self-hosted `agent-job` with artifacts and a proven failure path). The cloud
+controller, its state machine, the independent artifact verification and the
+dashboard are implemented and tested locally; the **Cloudflare deployment** is
+written but not executed (no account). See `docs/PHASE2D.md`.
 
 ## What runs today
 
@@ -137,6 +139,36 @@ used by Renovate and Copilot agentic workflows). Driving *other* repositories
 from one account's free minutes is the configuration to avoid. See
 `docs/PHASE0-AUDIT.md`.
 
+## Controller and dashboard (Phase 2D)
+
+The runner answers "can an agent do the work". The controller answers "who
+decides what runs, when, and whether the result is real".
+
+```bash
+export OC24_ADMIN_TOKEN=<long random token>    # required; the server refuses to start without it
+export OC24_REPO=<owner>/<repo>
+export OC24_GITHUB_TOKEN=<token>               # optional; without it jobs stay queued
+node controller/server.mjs                     # dashboard + API on http://127.0.0.1:8787
+node controller/server.mjs --print-config       # effective settings (tokens never printed)
+```
+
+It keeps a persistent queue (SQLite locally, D1 in the cloud), dispatches
+`agent-job.yml` via `workflow_dispatch`, polls the run, downloads the artifact and
+**verifies it independently** before a job may be called `succeeded`
+(`docs/PHASE2D.md` has the contract). Outcomes the system cannot establish become
+`unknown` and wait for a human - it never guesses, and it never re-runs a dispatch
+whose outcome is unknown unless a search proves no run exists for it.
+
+Dashboard: create jobs (free models only), watch queue/run/verify state, read
+artifact-verified metrics (model, tokens, cost, verification, diff), approve
+external-effect jobs, cancel runs, resolve `unknown` jobs. Real API data only -
+no simulated progress.
+
+Scheduler: `POST /api/tick` (external cron) or the Cloudflare Cron Trigger
+(`wrangler.toml`, `*/5`). `controller/worker.mjs` runs the identical state machine
+on D1; deployment needs a Cloudflare account and is the one part of this phase
+that has **not** been executed.
+
 ## Tests
 
 ```
@@ -156,11 +188,24 @@ platform results and known gaps: `docs/TESTPLAN.md`.
 runner/run-job.mjs            job orchestrator (artifacts, budgets, verify)
 runner/lib/adapter.mjs        opencode adapter (args, events, kills, version floor)
 runner/lib/util.mjs           git/node helpers, secret redactor
+runner/lib/report.mjs         advisory heartbeats/results to the controller
 runner/config/agent-policies.json   policy template appended to target repos
 runner/config/free-models.json      verified-free model allowlist
+controller/app.mjs            HTTP handler (API + dashboard), one fetch signature
+controller/server.mjs         Node entry: http bridge, tick loop, sqlite store
+controller/worker.mjs         Cloudflare Worker entry: fetch + scheduled, D1
+controller/lib/engine.mjs     job state machine, leases, idempotency, contract check
+controller/lib/store.mjs      SQL store (SQLite and D1 executors)
+controller/lib/github.mjs     Actions REST client (dispatch, runs, artifacts, cancel)
+controller/lib/zip.mjs        artifact/log zip reader (Web DecompressionStream)
+web/                          dashboard (vanilla JS, dark/light, mobile)
 tools/scan-run-dir.mjs        artifact secret scanner (CI gate)
 tests/runner.test.mjs         stub suite
+tests/controller.test.mjs     controller unit + handler suite
+tests/controller-e2e.test.mjs real child process, fake GitHub, restart recovery
+tests/report.test.mjs         runner -> controller report path
 tests/integration.test.mjs    real-model suite (opt-in)
+docs/PHASE2D.md               controller design, free-tier math, unverified list
 ```
 
 MIT licensed.

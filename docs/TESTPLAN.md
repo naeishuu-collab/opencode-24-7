@@ -5,11 +5,74 @@
 | suite | command | needs network | what it proves |
 | --- | --- | --- | --- |
 | stub | `npm test` | no | all exit codes, retries, budget kills, redaction, config merge/restore, argument validation |
+| controller | `node --test tests/controller.test.mjs` | loopback only | store/persistence, validation and caps, artifact contract, dispatch/verify/cancel/unknown, tick lock, auth, CSP, redaction |
+| controller E2E | `node --test tests/controller-e2e.test.mjs` | loopback only | real server process: full loop, self-ticking loop, restart recovery, no duplicate dispatch, two controllers on one DB, D1 call shape |
+| runner report | `node --test tests/report.test.mjs` | loopback only | a real runner reports to a real controller; a dead report target never fails a job |
 | integration | `RUN_OPENCODE_INTEGRATION=1 OC24_OPENCODE_BIN=<bin> node --test tests/integration.test.mjs` | yes (free model) | real event parsing, real bug fix + `node --test` verification, real policy denial of `git push` |
+
+`npm test` runs the stub, controller, controller-E2E and report suites
+(`node --test "tests/*.test.mjs"`), so the default suite is everything except the
+opt-in real-model run. The controller suites speak HTTP to
+`tests/stubs/fake-github.mjs`, a stand-in GitHub Actions API, so status handling
+(204/422/429/500) is exercised without touching GitHub.
 
 The stub suite replaces opencode with `tests/stubs/fake-opencode.mjs`, a
 deterministic emitter of the verified JSON event shape. Integration tests are
 opt-in because they depend on a model and a network.
+
+## Controller coverage (`tests/controller.test.mjs`)
+
+| case | setup | expected |
+| --- | --- | --- |
+| store | create/update job, attempt, event, counter, session, then reopen the file | all state survives; `countActiveAttempts`/`stats` agree |
+| allowlist | `opencode/paid-model`, short goal, bad `verify_cmd` | `model-not-allowlisted` / `invalid-goal` / `invalid-verify`; timeouts and attempts clamped to 60-3600 s and 1-3 |
+| external effect | `allow_external: true` | `awaiting_approval`, no dispatch until `POST /api/jobs/:id/approve` |
+| daily job cap | `maxJobsPerDay: 2` | third job refused with `daily-job-cap` |
+| contract | cost > 0 / other model / commit changed / missing or failed verification / merge markers in the diff | each fails with its own reason |
+| zip reader | deflate, store, junk bytes | entries in, `not a zip archive` for junk |
+| happy path | dispatch → run in progress → artifact → tick | `succeeded` with cost, tokens, verification and diff; a further tick does nothing (idempotent) |
+| paid artifact | artifact reports `costUsd: 0.03` | `failed`, reason mentions cost |
+| read-only proof | artifact shows a commit | `failed`, reason mentions read-only |
+| missing / corrupt artifact | no artifact, or junk bytes | `unknown` (safe stop), never success |
+| failed / cancelled run | run conclusions | `failed` / `cancelled` |
+| rejected dispatch | `422`, `max_attempts: 2` then `1` | attempt budget not consumed, job re-queues; with no budget left it fails |
+| unknown dispatch | `500` | job `unknown`; repeated ticks never re-dispatch; only `resolve(retry)` moves it |
+| adopted dispatch | `500` **and** a run for the marker | the run is adopted, never re-dispatched; it finishes `succeeded` |
+| prove-then-retry | `500`, no run, grace elapsed | attempt deleted, job re-queued, retry uses a new marker |
+| lease expiry | `dispatching` attempt with an expired lease | `unknown` with a lease reason |
+| rate limit | `403` + `x-ratelimit-remaining: 0` | job stays `queued`, attempt row removed, dispatch paused (no call while paused) |
+| caps | `maxConcurrent: 1`, `maxDispatchPerDay: 1` | one dispatch, the rest wait |
+| cancel | queued job / running job / finished job | cancelled immediately / run cancelled via API / `409` |
+| reports | good token, bad token, "success" claim | heartbeat and metrics stored as `runner-report`; bad token `401`; the job state never changes; artifact metrics overwrite the report |
+| token hygiene | dispatch then read events, attempts, artifacts | no attempt token, no GitHub token, only a token hash in the DB |
+| signed URL | artifact download through the fake's `302` | `Authorization` is not sent to the signed host |
+| auth | `/healthz`, `/api/jobs` with and without a session, wrong token, 11 logins | `200`, `401`, `401`, `429`; cookie is `HttpOnly` + `SameSite=Strict` |
+| input handling | broken JSON, paid model, unknown job/action, oversized or non-object body | `400`/`404` with a code, never a stack trace |
+| CSP | `GET /` | `default-src 'none'` and a script policy that allows only `/app.js` |
+| error path | store throws with a secret-looking string | `500` `internal-error`, the event log keeps a redacted reason |
+
+## Controller E2E coverage (`tests/controller-e2e.test.mjs`)
+
+| case | setup | expected |
+| --- | --- | --- |
+| no token | `OC24_ADMIN_TOKEN=""` | exit 1, "OC24_ADMIN_TOKEN is required" |
+| print config | `--print-config` | JSON summary, neither the admin nor the GitHub token appears |
+| full loop | child process + fake GitHub | login, create, dispatch, run link, artifact verification, `succeeded` with metrics, stats counters |
+| self-ticking | `OC24_TICK=1`, 5 s, **no manual tick** | the job is dispatched and finished by the server's own loop |
+| restart recovery | hard kill during a running job | after restart the job, attempt and run link are still there and finish normally |
+| crash between dispatch and completion | kill, restart, two ticks | exactly one dispatch call in total; the existing run is adopted |
+| two controllers, one database | same `OC24_DB_PATH`, simultaneous ticks | exactly one dispatch, one attempt |
+| free-tier caps | `OC24_MAX_DISPATCH_PER_DAY=1`, `OC24_MAX_CONCURRENT=1`, `OC24_MAX_JOBS_PER_DAY=2` | third job `429`; dispatch cap holds the second job |
+| D1 path | store over a D1-shaped executor | the same SQL drives a job to `succeeded` with metrics |
+
+## Runner report coverage (`tests/report.test.mjs`)
+
+| case | setup | expected |
+| --- | --- | --- |
+| report path | real runner + real controller server + attempt token | heartbeat recorded, `metrics.source = runner-report`, events `attempt-report`, job still `running` |
+| no leaks | same run | token absent from `job.json` and `logs/runner.log` |
+| dead target | `--report-url http://127.0.0.1:1/...` | exit 0, `success`, `report failed` logged, token not logged |
+
 
 ## Stub coverage (`tests/runner.test.mjs`)
 
@@ -52,10 +115,18 @@ opt-in because they depend on a model and a network.
 
 ## Platform results (Oct 2026, opencode v2.0.32, `opencode/deepseek-v4.1-flash-free`)
 
-| platform | stub suite (`npm test`) | integration suite |
+| platform | suite (`npm test`) | integration suite |
 | --- | --- | --- |
-| Windows 11, node 24.21.0 | 30 tests: 27 pass, 0 fail, 3 skipped (2 integration + SIGINT cancel) | both tests pass |
-| Ubuntu on WSL2 (Linux 6.18), node 22.22.1 | 30 tests: 27 pass, 0 fail, 3 skipped (integration only) | both tests pass |
+| Windows 11, node 24.21.0 | 76 tests: 73 pass, 0 fail, 3 skipped (2 integration + SIGINT cancel) | both tests pass |
+| Ubuntu on WSL2 (Linux 6.18), node 22.22.1 | 76 tests: 73 pass, 0 fail, 3 skipped (integration only) | both tests pass |
+
+Phase 2D (2026-10-19) added the controller suites to that same command, so the
+numbers above include them: 34 controller unit tests, 9 controller E2E tests
+(real child process, fake GitHub over loopback) and 2 runner-report tests. The
+controller suites were green on both platforms on the first cross-platform run;
+no platform-specific behaviour was found (`node:sqlite`, `DecompressionStream`,
+`AbortSignal.timeout`, `Headers.getSetCookie` all behave the same on Node 22 and
+24).
 
 ### Cloud runs (public repo `naeishuu-collab/opencode-24-7`, GitHub-hosted runners)
 
@@ -114,3 +185,8 @@ suite carries a regression test for it.
   though the policy works. Verify manually if it ever fails.
 - No load/soak test: concurrency, long jobs and artifact growth at scale are
   unmeasured; the log/patch caps are the only protection today.
+- Phase 2D controller gaps (see `docs/PHASE2D.md` for the full list): the
+  Cloudflare worker, its D1 binding and the 10 ms CPU/request budget are written
+  and unit-tested through the D1 call shape, but never deployed; a cloud runner
+  has never reported back to a controller (needs a public URL); controller events
+  are never pruned; the job goal is stored verbatim (not encrypted at rest).
