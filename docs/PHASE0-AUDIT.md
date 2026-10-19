@@ -82,15 +82,25 @@ repository, for this repository, with `contents: read`.
   tested in the stub suite.
 - Budget guards against the stub: wall-clock kill at 1 s (exit 11), token budget
   kill (exit 12), and kill on the first reported cost > $0 (exit 12).
+- Cloud (GitHub Actions, public repo `naeishuu-collab/opencode-24-7`, 2026-10-19):
+  `ci.yml` green on ubuntu-24.04 and windows-latest; `integration.yml` ran the
+  real free model twice at `costUsd: 0` (bug fix verified by a real `node --test`
+  run, and a real `git push` denied by policy); `agent-job.yml` ran a
+  self-hosted job that fixed the fixture bug (1 file, 24,989 tokens, $0, scan
+  gate clean, artifact uploaded) and a deliberately failing verify that exited 15
+  and failed the run while still uploading its artifacts. The workflow log shows
+  the token's permissions with `"push":false`, and the credential secret is
+  imported through stdin (`printf '%s' "$OPENCODE_AUTH_JSON" | opencode auth
+  import`) - both were on the unproven list before. The cloud runs also found
+  four bugs (see `docs/TESTPLAN.md`, Known gaps), all fixed and regression
+  tested.
 
 ## Not verified (Phase 2+ work)
 
-- The GitHub Actions workflows have never actually run: no GitHub remote and no
-  `gh` CLI on this machine, so runner minutes, artifact upload, the
-  least-privilege API proof, the upload gate and the CI path of
-  `OPENCODE_AUTH_JSON` are unproven. `opencode auth import` was verified locally
-  against a file (and `auth export` on both platforms); the stdin form used by
-  the workflows is not yet exercised.
+- Not verified: provider behaviour under sustained load (rate limits, quota
+  exhaustion, free-tier changes) - the allowlist's `verifiedAt` dates the last
+  check. The `--verify-cmd` sandwich is only as good as the command: a verify
+  that exits 0 without testing anything is not detectable by the runner.
 - No Cloudflare deployment; no CF account. Workers/D1 logs, limits and cron
   behaviour are doc-based only.
 - Running the opencode server inside a Durable Object (`@opencode/sdk/workerd`
@@ -98,8 +108,9 @@ repository, for this repository, with `contents: read`.
 - Free-model terms for providers other than OpenCode Console (GitHub Models,
   etc.), and whether opencode reports cost for every provider (the cost guard
   cannot see what a provider does not report).
-- Windows-specific kills (`taskkill /T /F`) were exercised by the timeout tests;
-  POSIX process-group kills and the SIGINT cancel path were skipped on win32.
+- Windows-specific kills (`taskkill /T /F`) are exercised by the timeout tests;
+  the POSIX process-group kill and the SIGINT cancel path run in the Linux suites
+  (WSL and ubuntu-latest CI) and are skipped on win32.
 
 ## Cost risks
 

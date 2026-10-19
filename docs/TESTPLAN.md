@@ -17,6 +17,8 @@ opt-in because they depend on a model and a network.
 | --- | --- | --- |
 | success | `ok` | exit 0, artifacts, diff contains tracked+untracked edits, `.opencode` restored and excluded |
 | env PWD | `ok` run with a foreign `PWD` | the agent sees the workspace path, never the caller's (opencode takes its project root from `PWD` on POSIX) |
+| verify env | `NODE_TEST_CONTEXT`/`NODE_TEST_WORKER_ID` in the caller env | the verify child never sees them (a child `node --test` would skip every file and still exit 0) |
+| workspace path | win32 only: uppercase path with forward slashes | accepted; the comparison is canonical, not a raw string compare |
 | silent agent | `silent` | exit 20, "no events", never success |
 | provider error | `fail` | exit 10, error captured, no retry by default |
 | transient error | `transient` | exit 10 with `--max-attempts 1`; two attempts with `--max-attempts 2` |
@@ -36,7 +38,7 @@ opt-in because they depend on a model and a network.
 | config rejection | `.jsonc` with comments, or `.json` + `.jsonc` | exit 13, file untouched |
 | version floor | `OC24_STUB_VERSION=2.0.26` | exit 14; `--skip-version-check` proceeds |
 | missing binary | `--opencode-bin <nonexistent>` | exit 14 |
-| bad arguments | unknown flag, `--max-tokens abc`, missing prompt/model | exit 13 |
+| bad arguments | unknown flag, `--max-tokens abc`, `--run-base ""`, missing prompt/model | exit 13 |
 | cancel | `hang` + SIGINT | exit 21 (skipped on win32) |
 
 ## Integration coverage (`tests/integration.test.mjs`)
@@ -51,8 +53,22 @@ opt-in because they depend on a model and a network.
 
 | platform | stub suite (`npm test`) | integration suite |
 | --- | --- | --- |
-| Windows 11, node 24.21.0 | 28 tests: 25 pass, 0 fail, 3 skipped (2 integration + SIGINT cancel) | both tests pass |
-| Ubuntu on WSL2 (Linux 6.18), node 22.22.1 | 28 tests: 26 pass, 0 fail, 2 skipped (integration only) | both tests pass |
+| Windows 11, node 24.21.0 | 30 tests: 27 pass, 0 fail, 3 skipped (2 integration + SIGINT cancel) | both tests pass |
+| Ubuntu on WSL2 (Linux 6.18), node 22.22.1 | 30 tests: 27 pass, 0 fail, 3 skipped (integration only) | both tests pass |
+
+### Cloud runs (public repo `naeishuu-collab/opencode-24-7`, GitHub-hosted runners)
+
+Every real-model run used the free tier only (`--max-cost-usd 0` and
+`--require-cost-report`); all reported $0.
+
+| run | what it proved |
+| --- | --- |
+| `ci` 39241810441 | first run: windows-latest found the forward-slash workspace bug (see Known gaps) |
+| `ci` 39243252048, 39247275598 | stub suite green on ubuntu-24.04 and windows-latest after the fixes |
+| `integration` 39246293549 | real model in the cloud: bug fix + real `node --test`, and a real `git push` denied by policy; artifact `oc24-integration-<id>` passed the scan gate and uploaded |
+| `integration` 39247295054 | re-run after the node-test-marker fix: `verify.log` shows the 2 tests really ran (previously the child `node --test` skipped every file and still exited 0) |
+| `agent-job` 39248464928 | self-hosted job: the agent fixed the fixture bug, exactly 1 file changed, 24,989 tokens, $0, verification really ran and passed; the log shows the workflow token has `"push":false`; artifact `oc24-job-<id>` uploaded after a clean scan |
+| `agent-job` 39248686377 | failure propagation: `--verify-cmd false` -> exit 15 (`verification command exited with code 1`), the run fails, and the artifacts are still uploaded as evidence |
 
 The Linux verification found a real bug: opencode resolves its project root from
 the `PWD` environment variable on POSIX, so a forwarded `PWD` made the agent
@@ -63,15 +79,27 @@ suite carries a regression test for it.
 
 ## Known gaps
 
-- The first CI run (2026-10-19, public repo) found two real bugs, both fixed and
-  regression tested: `git rev-parse --show-toplevel` answers with forward-slash
-  paths on `windows-latest`, which made the raw workspace comparison reject every
-  job with exit 13 (now a canonical path comparison), and GitHub rejects
-  `${{ runner.temp }}` in a job-level `env:` block ("Unrecognized named-value:
-  'runner'"), which invalidated `agent-job.yml` (RUN_BASE is now set per step).
-- Still unproven on CI after that run: artifact upload and its scan gate, the
-  API least-privilege proof, `opencode auth import` via stdin, and the real-model
-  suites on the hosted runner.
+- The first cloud runs (2026-10-19, public repo) found four real bugs. All are
+  fixed and regression tested:
+  1. `git rev-parse --show-toplevel` answers with forward-slash paths on
+     `windows-latest`, so the raw workspace comparison rejected every job with
+     exit 13 (now a canonical path comparison; win32 regression test).
+  2. GitHub rejects the `runner` context in a job-level `env:`, which invalidated
+     `agent-job.yml` outright (a 0s "failure" run named after the file path).
+     RUN_BASE is now set on each step that uses it.
+  3. A child `node --test` inherited `NODE_TEST_CONTEXT` from the test process and
+     skipped every file while still exiting 0, so `verify` passed without running
+     anything. Children now get a clean env (PWD pinned, node test markers
+     dropped) and a regression test covers it.
+  4. An empty `RUN_BASE` made the artifact scan report "nothing to scan, clean":
+     the gate failed open. The scan now refuses an unset, empty or missing run
+     directory, and the runner rejects `--run-base ""`.
+- The free models are "free for a limited time". The allowlist carries
+  `verifiedAt` (2026-10-18) and needs re-verification when providers change; a
+  revoked free model would fail closed with exit 13 until the list is updated.
+- Artifacts of a public repository are downloadable by anyone for the retention
+  window (7 days). The scan proves they contain no secret values, but they do
+  contain model output, diffs and the runner logs.
 - The stub cannot represent real provider quirks (partial JSON lines, late cost
   reporting, very large token counts).
 - Integration test 2 depends on the model obeying an explicit instruction to try

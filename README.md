@@ -7,9 +7,11 @@ It is designed to run on GitHub Actions with **zero dependencies** (Node built-i
 only) and **zero spend** (free models + `--max-cost-usd 0`).
 
 Status: Phase 2 - the runner, the model/cost policy and the artifact scanner are
-implemented and verified on Windows and Linux; the three GitHub Actions
-workflows are written but have not run yet (no remote, awaiting approval). The
-Cloudflare control plane is not built.
+implemented and verified on Windows, Linux and **GitHub Actions** (public repo
+[`naeishuu-collab/opencode-24-7`](https://github.com/naeishuu-collab/opencode-24-7);
+stub suite green on ubuntu-24.04 + windows-latest, real free-model runs at $0,
+self-hosted `agent-job` with artifacts and a proven failure path). The Cloudflare
+control plane is not built.
 
 ## What runs today
 
@@ -104,7 +106,8 @@ The last stdout line is machine-readable:
 
 Cost guard caveat: if a provider reports no cost at all, `job.json` says so in
 `notes` and the guard has nothing to observe. Free models that report `cost: 0`
-were verified to be safe under `--max-cost-usd 0`.
+were verified to be safe under `--max-cost-usd 0`; every cloud run so far
+reported `costUsd: 0` (see `docs/TESTPLAN.md`).
 
 ## Running jobs on GitHub Actions
 
@@ -120,6 +123,13 @@ Three workflows, all with `permissions: contents: read`:
   `--max-cost-usd 0 --require-cost-report`, scans the run directory for secret
   leaks and only then uploads `runs/` as a 7-day artifact. The agent can
   therefore only produce a diff - never a push.
+
+Credentials: `OPENCODE_AUTH_JSON` is read only by the import step of
+`integration.yml` and `agent-job.yml`, and by the scan step (which compares
+artifacts against it). It is never printed, the runner redacts secret-shaped
+values, and the artifact gate fails closed: no scan, or a failed scan, means no
+upload. Artifacts of a public repository can be downloaded by anyone during the
+7-day retention window - the scan is what keeps credentials out of them.
 
 Why self-hosted in this odd sense: GitHub's Acceptable Use rules allow the free
 Actions tier for developing the repository the workflow lives in (the pattern
