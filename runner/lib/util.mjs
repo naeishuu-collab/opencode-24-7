@@ -17,6 +17,18 @@ export function git(workspace, args, opts = {}) {
   return runSync("git", ["-C", workspace, ...args], opts);
 }
 
+// Env for anything the runner spawns. PWD is pinned to the workspace: POSIX
+// CLIs (opencode included) resolve the project root from it, not from getcwd().
+// node --test also sets markers in every test process; a child node --test that
+// inherits them skips every file and still exits 0, which would fake a pass.
+const NODE_TEST_ENV = ["NODE_TEST_CONTEXT", "NODE_TEST_WORKER_ID"];
+
+export function childEnv(workspace, extra = {}) {
+  const env = { ...process.env, ...extra, PWD: workspace };
+  for (const k of NODE_TEST_ENV) delete env[k];
+  return env;
+}
+
 // .mjs/.cjs/.js "binaries" (used by tests and stubs) run through the current node.
 export function execFor(bin) {
   return /\.(mjs|cjs|js)$/i.test(bin)

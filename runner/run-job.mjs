@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { genJobId, git, makeRedactor, ensureDir, writeJson } from "./lib/util.mjs";
+import { genJobId, git, makeRedactor, ensureDir, writeJson, childEnv } from "./lib/util.mjs";
 import {
   MIN_OPENCODE_VERSION,
   buildAgentArgs,
@@ -217,8 +217,7 @@ function runVerify(workspace, cmd, timeoutSec, redact, runDir) {
   return new Promise((resolve) => {
     const child = spawn(cmd, {
       cwd: workspace,
-      // PWD must match the real cwd: shells and some CLIs trust $PWD over getcwd().
-      env: { ...process.env, PWD: workspace },
+      env: childEnv(workspace),
       shell: true,
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
@@ -385,9 +384,7 @@ async function executeJob(cfg, ctx) {
         bin,
         args,
         cwd: workspace,
-        // opencode resolves the project root from PWD on POSIX, so never forward
-        // the caller's PWD: without this the agent edits the wrong repository.
-        env: { ...process.env, PWD: workspace },
+        env: childEnv(workspace),
         budgets,
         onLine,
         redact,

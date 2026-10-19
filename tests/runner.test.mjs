@@ -332,6 +332,21 @@ test("verify: timeout is a verification failure", () => {
   assert.equal(job.verification.timedOut, true);
 });
 
+test("verify: node test markers of the caller are not inherited", () => {
+  const dir = makeRepo();
+  // Seen in the first cloud run: the verify command inherited NODE_TEST_CONTEXT
+  // from the test process, so `node --test` inside it skipped every file and
+  // still exited 0. The agent spawn shares this env helper.
+  const probe = 'node -e "process.exit(process.env.NODE_TEST_CONTEXT || process.env.NODE_TEST_WORKER_ID ? 3 : 0)"';
+  const { code, job } = runRunner(dir, [...PROMPT, "--verify-cmd", probe], {
+    OC24_STUB_MODE: "ok",
+    NODE_TEST_CONTEXT: "child-v8",
+    NODE_TEST_WORKER_ID: "1",
+  });
+  assert.equal(code, 0);
+  assert.equal(job.verification.status, "passed");
+});
+
 test("config: repo policies survive, runner policies are appended last, file is restored", () => {
   const repoConfig = { $schema: "https://opencode.ai/config.json", policies: [{ action: "tool.use", resource: "shell:repo-custom *", effect: "deny" }] };
   const dir = makeRepo({ ".opencode/opencode.json": JSON.stringify(repoConfig, null, 2) + "\n" });
