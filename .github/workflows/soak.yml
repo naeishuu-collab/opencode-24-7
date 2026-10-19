@@ -6,13 +6,10 @@ name: soak
 # on the same state. The report only says `soak_24h: verified` when a 24 h window
 # has elapsed with >= 98 % measured uptime.
 #
-# The schedule is intentionally not enabled here: it is a temporary, finite test
-# (it stops being useful once the 24 h verdict is recorded) and enabling a
-# recurring workflow on a public repository is a separate, approved change.
-#
-# Manual run:
-#   gh workflow run soak.yml -f minutes=10 -f jobs=0     # smoke test
-#   gh workflow run soak.yml -f minutes=358 -f jobs=1    # one slice
+# The schedule below is a finite test: four to five slices of ~6 h cover a 24 h
+# window, the harness accumulates measured uptime in the Actions cache, and once
+# the verdict is `verified` every later slice exits immediately. Remove the
+# schedule (or disable the workflow) when the verdict is recorded.
 on:
   workflow_dispatch:
     inputs:
@@ -28,8 +25,8 @@ on:
         description: "SIGKILL + restart the controller every N minutes (0 = never)"
         required: false
         default: "90"
-  # schedule:
-  #   - cron: "5 */6 * * *"
+  schedule:
+    - cron: "5 */6 * * *"
 
 permissions:
   contents: read
@@ -70,7 +67,7 @@ jobs:
             --out runs/soak-cloud \
             --state runs/soak-cloud/state.json \
             --restart-every-min "${{ inputs.restart_every_min || '90' }}" \
-            --jobs "${{ inputs.jobs || '0' }}" \
+            --jobs "${{ inputs.jobs || '1' }}" \
             --label "github:${{ github.run_id }}"
       - name: save soak state
         if: always()

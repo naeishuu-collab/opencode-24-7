@@ -91,6 +91,13 @@ const state = savedState ?? {
   jobs_created: 0,
 };
 
+// Self-terminating: once a 24 h window has been verified the scheduled slices
+// have nothing left to prove. The schedule itself is removed after that.
+if (state.verdict_24h === "verified") {
+  console.log("[soak] 24 h soak already verified in this state file; nothing to do");
+  process.exit(0);
+}
+
 // A fresh admin token per slice: the state file (which is cached in CI) never
 // holds a credential, and the controller still refuses to start without one.
 const adminToken = crypto.randomUUID().replace(/-/g, "");
@@ -386,6 +393,9 @@ const report = {
 };
 
 fs.writeFileSync(path.join(args.out, "soak-report.json"), JSON.stringify(report, null, 2));
+state.verdict_24h = report.verdict.soak_24h;
+state.verdict_reason = report.verdict.reason;
+fs.writeFileSync(args.state, JSON.stringify(state, null, 2));
 record("slice-end", { minutes: slice.minutes, verdict: report.verdict });
 await sleep(200);
 evidence.end();
