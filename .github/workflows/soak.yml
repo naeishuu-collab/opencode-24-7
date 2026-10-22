@@ -1,37 +1,36 @@
 name: soak
 
-# 24 h soak in slices. A GitHub-hosted job cannot run longer than 6 h, so each
-# scheduled slice runs the real controller for ~5 h 58 m, persists the database
-# and the accumulated runtime in the Actions cache, and the next slice continues
-# on the same state. The report only says `soak_24h: verified` when a 24 h window
-# has elapsed with >= 98 % measured uptime.
+# 24 h soak in slices. A GitHub-hosted job cannot run longer than 6 h, and a
+# scheduled trigger can be delayed by tens of minutes, so the slices chain
+# themselves: when a slice ends it dispatches the next one immediately (the
+# `soak` concurrency group keeps them serialized). Each slice persists the
+# database and the accumulated runtime in the Actions cache.
 #
-# The schedule below is a finite test: four to five slices of ~6 h cover a 24 h
-# window, the harness accumulates measured uptime in the Actions cache, and once
-# the verdict is `verified` every later slice exits immediately. Remove the
-# schedule (or disable the workflow) when the verdict is recorded.
+# The report only says `soak_24h: verified` when a >= 24 h window has elapsed
+# with >= 98 % measured uptime. The chain is finite: five 300-minute slices
+# (~25 h of wall time) and it stops when the verdict is `verified`, so the
+# schedule is not needed. Start it once with:
+#   gh workflow run soak.yml -f minutes=300 -f jobs=1 -f restart_every_min=90
 on:
   workflow_dispatch:
     inputs:
       minutes:
-        description: "minutes to run in this slice (<= 358)"
+        description: "minutes to run in this slice (<= 300)"
         required: false
-        default: "358"
+        default: "300"
       jobs:
         description: "real jobs to create during the slice (0 = none)"
         required: false
-        default: "0"
+        default: "1"
       restart_every_min:
         description: "SIGKILL + restart the controller every N minutes (0 = never)"
         required: false
         default: "90"
-  schedule:
-    - cron: "5 */6 * * *"
 
 permissions:
   contents: read
-  # Needed for the controller's workflow_dispatch, which is the one event GitHub
-  # allows GITHUB_TOKEN to create. Nothing else is granted.
+  # Needed for workflow_dispatch, which is the one event GitHub allows
+  # GITHUB_TOKEN to create. Nothing else is granted.
   actions: write
 
 concurrency:
@@ -51,21 +50,21 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            runs/soak-cloud/state.json
-            runs/soak-cloud/controller.db
-            runs/soak-cloud/controller.db-wal
-            runs/soak-cloud/controller.db-shm
-          key: soak-${{ github.run_id }}
-          restore-keys: soak-
+            runs/soak-final/state.json
+            runs/soak-final/controller.db
+            runs/soak-final/controller.db-wal
+            runs/soak-final/controller.db-shm
+          key: soak-final-${{ github.run_id }}
+          restore-keys: soak-final-
       - name: run a soak slice
         env:
           OC24_GITHUB_TOKEN: ${{ github.token }}
           OC24_REPO: ${{ github.repository }}
         run: |
           node tools/soak.mjs \
-            --minutes "${{ inputs.minutes || '358' }}" \
-            --out runs/soak-cloud \
-            --state runs/soak-cloud/state.json \
+            --minutes "${{ inputs.minutes || '300' }}" \
+            --out runs/soak-final \
+            --state runs/soak-final/state.json \
             --restart-every-min "${{ inputs.restart_every_min || '90' }}" \
             --jobs "${{ inputs.jobs || '1' }}" \
             --label "github:${{ github.run_id }}"
@@ -74,16 +73,36 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: |
-            runs/soak-cloud/state.json
-            runs/soak-cloud/controller.db
-            runs/soak-cloud/controller.db-wal
-            runs/soak-cloud/controller.db-shm
-          key: soak-${{ github.run_id }}
+            runs/soak-final/state.json
+            runs/soak-final/controller.db
+            runs/soak-final/controller.db-wal
+            runs/soak-final/controller.db-shm
+          key: soak-final-${{ github.run_id }}
       - name: upload evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: soak-evidence-${{ github.run_id }}
-          path: runs/soak-cloud
+          path: runs/soak-final
           if-no-files-found: warn
           retention-days: 30
+      # Chain the next slice only after the state is saved, and stop when the
+      # 24 h verdict is verified or the finite slice budget is spent.
+      - name: chain the next slice
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          verdict=$(node -e 'try{console.log(require("./runs/soak-final/soak-report.json").verdict.soak_24h)}catch{console.log("none")}')
+          slices=$(node -e 'try{console.log(require("./runs/soak-final/state.json").slices.length)}catch{console.log(0)}')
+          echo "verdict=$verdict slices=$slices"
+          if [ "$verdict" = "verified" ] || [ "$slices" -ge 5 ]; then
+            echo "chain stop (verified or five slices reached)"
+            exit 0
+          fi
+          gh workflow run soak.yml --repo "$GITHUB_REPOSITORY" \
+            -f minutes="${{ inputs.minutes || '300' }}" \
+            -f jobs="${{ inputs.jobs || '1' }}" \
+            -f restart_every_min="${{ inputs.restart_every_min || '90' }}"
+          echo "chained the next slice"
