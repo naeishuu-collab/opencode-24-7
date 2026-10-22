@@ -49,30 +49,56 @@ Both products stay on the free plan unless the account is explicitly upgraded;
 this repository never enables a paid feature, and `OC24_MAX_COST_USD=0` keeps the
 model side free as well.
 
-## Deployment runbook (needs an account; approval required)
+## Deployment runbook (deployed 2026-10-19)
+
+The free plan was deployed and exercised for real; this is what it took.
 
 ```sh
-wrangler login                                   # account owner
-wrangler d1 create oc24-controller               # copy database_id
-#   put database_id into wrangler.toml (replacing REPLACE_WITH_D1_DATABASE_ID)
-npx wrangler d1 execute oc24-controller --file migrations/0001_schema.sql --remote
-npx wrangler secret put OC24_ADMIN_TOKEN         # long random string
+wrangler login                                   # account owner (OAuth, expires in ~1 h)
+wrangler whoami                                  # confirm the account
+wrangler d1 create oc24-controller               # database_id below
+#   put database_id into wrangler.toml
+npx wrangler d1 execute oc24-controller --file migrations/0001_schema.sql --remote -y
+npx wrangler secret put OC24_ADMIN_TOKEN         # long random string, read from stdin
+npx wrangler secret put OC24_GOAL_KEY            # >= 16 chars, no way to recover it
 npx wrangler secret put OC24_GITHUB_TOKEN        # fine-grained PAT: actions:write, contents:read
-npx wrangler secret put OC24_GOAL_KEY            # optional, >= 16 chars, no way to recover it
 npx wrangler deploy
 ```
 
-After deploying, set `OC24_CONTROLLER_URL` to the workers.dev URL (or leave it
-unset: runner reports are advisory only) and verify:
+Live values:
+
+| item | value |
+| --- | --- |
+| worker | `https://oc24-controller.naeishuu.workers.dev` |
+| D1 | `oc24-controller`, `49efd2f8-a70b-4814-8f15-ff4e1fb35b68`, APAC (KIX) |
+| cron | `*/5 * * * *` (Workers Cron Triggers, free plan) |
+| secrets | `OC24_ADMIN_TOKEN`, `OC24_GOAL_KEY` (both random, generated locally) |
+| `OC24_GITHUB_TOKEN` | **not set** - creating a least-privilege fine-grained PAT needs the account owner in the browser; until then the worker stores jobs but cannot dispatch |
+
+Gotchas found during the deploy (all fixed in the code before the final deploy):
+
+* The account had no `workers.dev` subdomain, so `wrangler deploy` refused to
+  publish. It was registered once through the API (`naeishuu`); the dashboard
+  link in the error message does the same thing.
+* `preview_urls` is on by default in wrangler 4 and would publish a second,
+  unlisted URL for every version. `wrangler.toml` now sets `preview_urls = false`.
+* **Real bug, caught only by the first live request**: D1's `db.exec()` splits its
+  input on newlines and runs each line as a statement, so a formatted multi-line
+  `CREATE TABLE` fails with `SQLITE_ERROR: incomplete input`. The D1 executor now
+  splits on statement boundaries and flattens each statement; the D1 call-shape
+  test rejects multi-line `exec` input so it cannot come back.
+* A fresh hostname can fail the TLS handshake for the first request or two while
+  Cloudflare provisions the certificate; retry before assuming a network block.
+* `wrangler login` is an OAuth session with a ~1 h access token. Re-run it before
+  a deploy; a long-lived `CLOUDFLARE_API_TOKEN` is the better long-term option.
+
+After deploying, `OC24_CONTROLLER_URL` is set to the workers.dev URL (runner
+reports are advisory only) and the worker is verified with:
 
 ```sh
-curl https://<worker>.workers.dev/healthz
-# then sign in from the dashboard, create one job, and watch it reach a terminal
-# state with no local process running.
+curl https://oc24-controller.naeishuu.workers.dev/healthz   # {"ok":true,...,"version":"2e"}
 ```
 
-`wrangler.toml` deliberately keeps the placeholder id: `wrangler deploy` fails
-loudly rather than deploying against an unknown database.
 
 ## Agent adapters
 
@@ -130,10 +156,11 @@ when a token is present) for a bounded window:
 The verdict is deliberately strict: `soak_24h: verified` requires a **24 h
 window with >= 98 % measured uptime**. A shorter run reports `pending`, the
 window and the coverage. The Actions workflow (`.github/workflows/soak.yml`)
-runs one ~6 h slice per dispatch (a GitHub-hosted job cannot exceed 6 h) and
-persists the database and the accumulator in the Actions cache. Its schedule is
-commented out until the 24 h soak is approved: it is a finite test, not a
-production loop.
+runs one slice per dispatch (a GitHub-hosted job cannot exceed 6 h) and persists
+the database and the accumulator in the Actions cache. Slices **chain
+themselves**: the last step dispatches the next slice, the `soak` concurrency
+group keeps them serialized, and the chain stops when the verdict is `verified`
+or after five 300-minute slices (finite test, not a production loop).
 
 ## Verification status
 
@@ -161,22 +188,66 @@ Executed locally (Windows 11 / node 24.21 and WSL2 Ubuntu / node 22.22):
   evidence artifact, and reported `pending`. This validates the workflow file and
   `tools/soak.mjs` on Linux; it is not the 24 h measurement.
 
+Deployed and exercised in the real cloud (2026-10-19, free plan):
+
+* `https://oc24-controller.naeishuu.workers.dev/healthz` -> 200
+  `{"ok":true,...,"version":"2e"}`; unauthenticated `/api/jobs` -> 401;
+  dashboard -> 200 with CSP; a wrong admin token -> 401 `bad-token`.
+* The worker writes to D1 on its own: `schema=2`, `last_maintenance_at` set by
+  the `*/5` cron with no local process, and real `job-created` / `login` /
+  `maintenance` rows. Over the 2.5 days after the deploy it recorded **10
+  maintenance events** (one per 6 h retention run) with the worker never touched
+  by hand.
+* Free-plan usage after 2.5 days: D1 **86 kB** (limit 500 MB), last 24 h
+  **4,784 read queries / 573 write queries / 3,159 rows read / 588 rows
+  written** - orders of magnitude inside the free limits.
+* Goal confidentiality in the live database: the stored column starts `enc1.`
+  while the authenticated API returns the plaintext.
+* A job created through the cloud API persists as `queued`; dispatch is blocked
+  only by the missing `OC24_GITHUB_TOKEN` (see Known gaps).
+* The first request after the deploy failed with `SQLITE_ERROR: incomplete
+  input` because D1's `exec()` splits on newlines. Fixed, redeployed and
+  re-verified; the D1 call-shape test now rejects multi-line `exec` input.
+
+24 h soak (measured, not claimed):
+
+* 9 scheduled slices, `2026-10-19T22:53Z` -> `2026-10-22T05:33Z` (3280 min
+  window): **5740/5740 samples answered**, every invariant green, 9 real jobs,
+  $0 - but only **87.51 % wall coverage**, so the verdict stayed `pending`
+  (needs >= 98 %). Root cause: GitHub's scheduled triggers arrived 9-60 min
+  late, turning the designed 2-minute handoffs into ~47-minute gaps.
+* Those 9 jobs: 1 succeeded, 8 failed **verification** with `npm test` exiting 1.
+  The cause was a test time bomb, not the agent or the controller: the
+  lease-expiry test hardcoded `2026-10-19`, which fell outside the 24 h grace
+  after a day, so the suite went red for every job on `main`. Fixed in
+  `37ad7a0` (relative timestamp) and the suite is green again.
+* A new chain (5 x 300 min, back-to-back) was started on 2026-10-22
+  (first slice: run `39739170179`) to measure a window without scheduler gaps.
+  Until that window closes the verdict is **PENDING**.
+
 Not verified:
 
-* **Cloudflare deployment** — no account. The Worker, D1 binding, cron trigger
-  and the 10 ms CPU/request budget are written, but the real runtime is untested.
-* **24 h soak** — the harness and the sliced workflow exist; the measurement is
-  `PENDING` until a real 24 h window has elapsed (>= 98 % uptime).
-* Cloud runner -> public controller report (needs the deployed URL).
+* **24 h verdict** - PENDING: the chain is running; this file needs the measured
+  numbers when it closes.
+* Cloud dispatch **from the worker** - `OC24_GITHUB_TOKEN` is not registered
+  (creating a fine-grained PAT needs the account owner in the browser). The
+  workflow token can dispatch: every soak slice created a real job with
+  `workflow_dispatch`, which is the event `GITHUB_TOKEN` may create.
+* Cloud runner -> public controller report at load (the advisory callback is
+  wired to the deployed URL but not exercised at scale).
 * Sustained load at the free-plan edges (many jobs/day, D1 row counts).
 * Codex/Claude/Gemini adapters are declarations only.
 
 ## Known gaps
 
-* `wrangler.toml` still has the database-id placeholder (intentional).
+* Cloud dispatch waits for the fine-grained PAT (`actions: write`,
+  `contents: read`, repository `naeishuu-collab/opencode-24-7`). The dashboard is
+  fully usable without it.
+* `wrangler login` is an OAuth session that expires after ~1 h; prefer
+  `CLOUDFLARE_API_TOKEN` for unattended deploys.
 * `compatibility_date = 2025-09-01` must be re-checked at deploy time.
 * Encrypted goals cannot be searched by text (ids still match).
-* The soak workflow is dispatch-only; enabling its schedule is a separate
-  approved change.
 * If the Actions cache is evicted between soak slices, the accumulated runtime
-  restarts from zero and the verdict stays `pending` — the honest failure mode.
+  restarts from zero and the verdict stays `pending` - the honest failure mode.
+* The chain is finite (five slices). If the 5th still misses 98 %, the report
+  says why and the chain stops; there is no silent retry.
