@@ -495,7 +495,9 @@ test("a dispatch lease that expires without confirmation becomes unknown", async
   // outcome of an unconfirmed dispatch is unknown, and nothing moves on its own.
   const { engine, store } = await harness({ engine: { noRunGraceSec: 86400 } });
   const job = await createJob(engine);
-  const past = "2026-10-19T00:00:00Z";
+  // Not a fixed date: the test needs an expired lease that is still inside the
+  // 24 h grace, so a hardcoded timestamp turns into a time bomb once a day passes.
+  const past = new Date(Date.now() - 60 * 60 * 1000).toISOString();
   await store.createAttempt({
     id: "att-crashed",
     job_id: job.id,

@@ -264,7 +264,7 @@ export function createApp({ store, engine, config, assets = {}, now = () => nowI
         const status = result.code === "daily-job-cap" ? 429 : 400;
         return errorResponse(status, result.code, result.message);
       }
-      return jsonResponse({ ok: true, job: publicJob(result.job) }, 201);
+      return jsonResponse({ ok: true, job: publicJob(result.job, await engine.openGoal(result.job)) }, 201);
     }
 
     if (parts[0] === "api" && parts[1] === "jobs" && parts[2]) {
@@ -303,7 +303,7 @@ export function createApp({ store, engine, config, assets = {}, now = () => nowI
           const status = result.code === "not-found" ? 404 : result.code === "already-finished" ? 409 : 400;
           return errorResponse(status, result.code, result.message);
         }
-        return jsonResponse({ ok: true, job: publicJob(result.job), note: result.note ?? null });
+        return jsonResponse({ ok: true, job: publicJob(result.job, await engine.openGoal(result.job)), note: result.note ?? null });
       }
     }
 

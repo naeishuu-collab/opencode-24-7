@@ -413,7 +413,15 @@ export function createD1Executor(d1) {
   return {
     kind: "d1",
     async exec(sql) {
-      await d1.exec(sql);
+      // D1's exec() splits its input on newlines and runs each line as its own
+      // statement, so a formatted multi-line CREATE TABLE arrives as an
+      // "incomplete input" error (live bug found on the first deploy). Split on
+      // real statement boundaries, then flatten each statement to one line.
+      const statements = String(sql)
+        .split(/;\s*(?:\n|$)/)
+        .map((part) => part.replace(/\s*\n\s*/g, " ").trim())
+        .filter(Boolean);
+      for (const statement of statements) await d1.exec(statement);
     },
     async run(sql, params = []) {
       const r = await d1.prepare(sql).bind(...params).run();

@@ -28,6 +28,8 @@ name = "oc24-controller"
 main = "controller/worker.mjs"
 compatibility_date = "2025-09-01"
 workers_dev = true
+# One public URL only: preview URLs would add an unlisted second entry point.
+preview_urls = false
 
 [observability]
 enabled = true
@@ -36,7 +38,7 @@ enabled = true
 binding = "DB"
 database_name = "oc24-controller"
 # Replace after `wrangler d1 create oc24-controller` (the id is account-specific).
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "49efd2f8-a70b-4814-8f15-ff4e1fb35b68"
 migrations_dir = "migrations"
 
 [[rules]]
@@ -64,4 +66,4 @@ OC24_MAX_DISPATCHES_PER_TICK = "1"
 OC24_EVENT_RETENTION_DAYS = "30"
 OC24_GOAL_RETENTION_DAYS = "0"
 # Set to the deployed URL so runners can post advisory heartbeats:
-# OC24_CONTROLLER_URL = "https://oc24-controller.<account>.workers.dev"
+OC24_CONTROLLER_URL = "https://oc24-controller.naeishuu.workers.dev"

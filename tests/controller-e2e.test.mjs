@@ -424,8 +424,17 @@ test("the store runs through the D1 executor call shape (Cloudflare path)", asyn
   const fake = await startFakeGithub();
   const { DatabaseSync } = await import("node:sqlite");
   const db = new DatabaseSync(":memory:");
+  const execSql = [];
   const d1 = {
     async exec(sql) {
+      // The real D1 API splits exec() input on newlines and runs each line as a
+      // statement, so a formatted multi-line CREATE TABLE fails there with
+      // "incomplete input" (found live on the first deploy). Fail the same way
+      // here so the schema can never go back to multi-line exec input.
+      execSql.push(String(sql));
+      if (String(sql).includes("\n")) {
+        throw new Error("D1_EXEC_ERROR: Error in line 1: incomplete input: SQLITE_ERROR");
+      }
       db.exec(sql);
     },
     prepare(sql) {
@@ -447,6 +456,9 @@ test("the store runs through the D1 executor call shape (Cloudflare path)", asyn
   };
 
   const store = await createStore(createD1Executor(d1)).init();
+  // Every statement handed to D1's exec() must be a single line (see above).
+  assert.ok(execSql.length >= 6, `schema statements: ${execSql.length}`);
+  assert.ok(execSql.every((sql) => !sql.includes("\n")), "multi-line exec input would break on D1");
   const github = createGithub({ token: "ghp_d1_test_not_real", repo: "owner/repo", apiBase: fake.url, fetchImpl: fetch });
   const engine = createEngine({
     store,
