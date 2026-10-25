@@ -618,6 +618,15 @@ export function createEngine({ store, github, config, now = () => nowIso() }) {
         await ev("job-failed", { job_id: job.id, message, at });
         continue;
       }
+      // Goals are sealed at rest when OC24_GOAL_KEY is set: the runner must get
+      // the plaintext. An unreadable goal is a definite stop, never a guess.
+      const prompt = await openGoal(job);
+      if (prompt.startsWith("[encrypted:")) {
+        const message = "goal cannot be decrypted with the configured OC24_GOAL_KEY; refusing to dispatch";
+        await store.updateJob(job.id, { state: JOB.failed, last_error: message, finished_at: at });
+        await ev("job-failed", { job_id: job.id, message, at });
+        continue;
+      }
 
       const n = attempts.length + 1;
       const attemptId = newAttemptId();
@@ -640,7 +649,7 @@ export function createEngine({ store, github, config, now = () => nowIso() }) {
           workflow: job.workflow,
           ref: job.ref,
           inputs: {
-            prompt: job.goal,
+            prompt,
             model: job.model,
             verify_cmd: job.verify_cmd ?? "",
             timeout_sec: String(job.timeout_sec),

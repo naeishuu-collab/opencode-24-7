@@ -309,6 +309,48 @@ test("goals: a wrong or missing key fails closed without throwing", async () => 
   assert.equal(await openText("a-valid-key-0123456789", "enc1.hello"), "enc1.hello");
 });
 
+test("goals: dispatch sends the plaintext goal and refuses an unreadable one", async () => {
+  const key = "test-goal-key-0123456789abcdef";
+  const { fake, engine, store, github } = await harness({ key });
+  const goal = "dispatch the plaintext goal, never the ciphertext";
+  await makeJob(engine, { goal });
+
+  const out = await engine.tick();
+  assert.equal(out.dispatched.length, 1);
+  const inputs = fake.lastDispatchInputs();
+  assert.equal(inputs.prompt, goal);
+  assert.ok(!String(inputs.prompt).startsWith("enc1."));
+
+  // The same store opened with a different key: the queued job cannot be read,
+  // so it must fail closed instead of dispatching the "[encrypted: ...]" marker.
+  const wrong = createEngine({
+    store,
+    github,
+    config: {
+      repo: "owner/repo",
+      ref: "main",
+      workflow: "agent-job.yml",
+      freeModels: FREE,
+      maxConcurrent: 2,
+      maxDispatchPerDay: 20,
+      maxJobsPerDay: 50,
+      maxCostUsd: 0,
+      leaseSec: 900,
+      noRunGraceSec: 1800,
+      tickLeaseSec: 60,
+      goalKey: "another-key-0123456789abcdef",
+    },
+  });
+  const unreadable = await makeJob(engine, { goal: "a goal the other key cannot read" });
+  const later = new Date(Date.now() + 180_000).toISOString();
+  const out2 = await wrong.tick({ at: later });
+  assert.equal(out2.dispatched.length, 0);
+  const row = await store.getJob(unreadable.id);
+  assert.equal(row.state, "failed");
+  assert.match(row.last_error, /cannot be decrypted/);
+  assert.equal(fake.dispatchCalls().length, 1);
+});
+
 // ---------------------------------------------------------------------------
 // D1 free-plan budget
 // ---------------------------------------------------------------------------
