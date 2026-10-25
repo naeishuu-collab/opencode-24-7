@@ -221,14 +221,17 @@ Deployed and exercised in the real cloud (2026-10-19, free plan):
   lease-expiry test hardcoded `2026-10-19`, which fell outside the 24 h grace
   after a day, so the suite went red for every job on `main`. Fixed in
   `37ad7a0` (relative timestamp) and the suite is green again.
-* A new chain (5 x 300 min, back-to-back) was started on 2026-10-22
-  (first slice: run `39739170179`) to measure a window without scheduler gaps.
-  Until that window closes the verdict is **PENDING**.
+* **Verified**: the chained run (5 x 300 min, back-to-back, no scheduler in the
+  path) closed the window `2026-10-22T07:14:58Z` -> `2026-10-23T08:16:01Z`
+  (**1501.1 min**, 25.0 h): **coverage 99.94 %**, **3000/3000 samples
+  answered**, 15 SIGKILL/restart cycles, **5/5 real jobs succeeded**, every
+  invariant green, **$0**. `state.verdict_24h = verified`.
+  Slices: `39739170179`, `39776796741`, `39821023016`, `39863614001`,
+  `39894071084`; each left a `soak-evidence-<run id>` artifact with the report,
+  the events and the database.
 
 Not verified:
 
-* **24 h verdict** - PENDING: the chain is running; this file needs the measured
-  numbers when it closes.
 * Cloud dispatch **from the worker** - `OC24_GITHUB_TOKEN` is not registered
   (creating a fine-grained PAT needs the account owner in the browser). The
   workflow token can dispatch: every soak slice created a real job with

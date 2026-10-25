@@ -18,11 +18,11 @@ artifact and marked the job `succeeded` at $0. Phase 2E adds retention,
 pagination/search, encrypted goals, the agent adapter boundary and a soak
 harness. **The Cloudflare deployment is live**
 ([`oc24-controller.naeishuu.workers.dev`](https://oc24-controller.naeishuu.workers.dev),
-Workers + D1 + cron on the free plan, goals AES-GCM encrypted at rest), and the
-24 h soak is **PENDING** by its own strict definition: a four-day measured window
-answered 100 % of samples inside slices but reached only 87.5 % wall coverage
-because GitHub's scheduled triggers were late, so the slices now chain
-back-to-back. See `docs/PHASE2E.md`.
+Workers + D1 + cron on the free plan, goals AES-GCM encrypted at rest). The
+**24 h soak is verified** by its own strict definition: a chained run (five
+300-minute slices, no scheduler in the path) measured **99.94 % uptime over
+1501 min**, 3000/3000 samples answered, 15 SIGKILL restarts, 5/5 real jobs
+succeeded, all invariants green, $0. See `docs/PHASE2E.md`.
 
 ## What runs today
 

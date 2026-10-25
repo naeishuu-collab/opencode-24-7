@@ -158,7 +158,7 @@ Every real-model run used the free tier only (`--max-cost-usd 0` and
 | `soak` 39370579896 ... 39679757539 | 9 scheduled slices over 2026-10-19T22:53Z..2026-10-22T05:33Z: **5740/5740 samples**, all invariants green, 9 real jobs, $0. The measured wall coverage was **87.51 %** because GitHub's scheduled triggers arrived 9-60 min late, so the verdict correctly stayed `pending`; this is why the slices now chain instead of relying on the schedule. |
 | `agent-job` 39387682370 | one of those 9 jobs: the agent changed **only** `README.md` and its final text matched the goal, but `npm test` exited 1. The artifact's `verify.log` showed `tests/controller.test.mjs:493` expecting `unknown` and getting `failed` - a test that hardcoded `2026-10-19` had fallen outside the 24 h grace. Fixed in `37ad7a0`; the suite is green again on Windows, WSL and both CI platforms. |
 | `soak` 39737593336 -> 39738795097 | chained-slice smoke: five 2-minute slices, each dispatching the next one after saving its state; the last one logged `verdict=pending slices=5` and `chain stop`. The `soak` concurrency group serialized the handoffs and every slice restored the previous cache. |
-| `soak` 39739170179 ... | the real measured chain started 2026-10-22T07:14Z: five 300-minute slices, one real job per slice, a SIGKILL restart every 90 min. Verdict **PENDING** until the window closes (~2026-10-23T08:15Z). |
+| `soak` 39739170179 -> 39894071084 | **the measured 24 h chain**: five 300-minute slices chained back-to-back (last slice created 2026-10-23T03:15:51Z), window `2026-10-22T07:14:58Z`..`2026-10-23T08:16:01Z` = **1501.1 min**, **coverage 99.94 %**, **3000/3000 samples**, 15 SIGKILL restarts, **5/5 real jobs succeeded**, all invariants green, $0 -> `verdict.soak_24h = verified`. |
 
 The Linux verification found a real bug: opencode resolves its project root from
 the `PWD` environment variable on POSIX, so a forwarded `PWD` made the agent
@@ -201,15 +201,14 @@ suite carries a regression test for it.
 - Integration test 2 depends on the model obeying an explicit instruction to try
   `git push`; a model that refuses on its own would fail the assertion even
   though the policy works. Verify manually if it ever fails.
-- No load/soak test has **completed**: the harness (`tools/soak.mjs`) and the
-  sliced workflow exist and a short smoke run passed, but the 24 h measurement is
-  PENDING until a real 24 h window has elapsed. The 24/7 claim is therefore not
-  made yet.
-- Phase 2E cloud gaps (see `docs/PHASE2E.md`): the Cloudflare worker, its D1
-  binding and the 10 ms CPU/request budget are written and tested through the D1
-  call shape (including the <= 45-statement tick), but never deployed; a cloud
-  runner has never reported back to a controller (needs a public URL); the
-  Cloudflare cron has never fired a real tick.
+- A load/soak test has **completed**: the 24 h chain measured 99.94 % uptime over
+  1501 min (3000/3000 samples, 5/5 real jobs, $0, all invariants green), so
+  `soak_24h` is `verified`. See `docs/PHASE2E.md`.
+- Phase 2E cloud gaps (see `docs/PHASE2E.md`): the Cloudflare worker, D1 binding
+  and cron are deployed and exercised; the remaining gap is a dispatch **from the
+  worker itself** (needs the fine-grained PAT). A cloud runner has not yet
+  reported back to the public controller (the advisory callback is wired but not
+  exercised at load).
 - Goal encryption is opt-in (`OC24_GOAL_KEY`); without the key goals are stored
   as plain text in SQLite/D1. Encrypted goals cannot be searched by text (ids
   still match), and a lost key makes them unreadable by design.
