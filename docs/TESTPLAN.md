@@ -117,8 +117,8 @@ opt-in because they depend on a model and a network.
 
 | platform | suite (`npm test`) | integration suite |
 | --- | --- | --- |
-| Windows 11, node 24.21.0 | 87 tests: 84 pass, 0 fail, 3 skipped (2 integration + SIGINT cancel) | both tests pass |
-| Ubuntu on WSL2 (Linux 6.18), node 22.22.1 | 87 tests: 84 pass, 0 fail, 3 skipped (integration only) | both tests pass |
+| Windows 11, node 24.21.0 | 88 tests: 85 pass, 0 fail, 3 skipped (2 integration + SIGINT cancel) | both tests pass |
+| Ubuntu on WSL2 (Linux 6.18), node 22.22.1 | 88 tests: 85 pass, 0 fail, 3 skipped (integration only) | both tests pass |
 
 Phase 2D (2026-10-19) added the controller suites to that same command, so the
 numbers above include them: 34 controller unit tests, 9 controller E2E tests
@@ -128,13 +128,14 @@ no platform-specific behaviour was found (`node:sqlite`, `DecompressionStream`,
 `AbortSignal.timeout`, `Headers.getSetCookie` all behave the same on Node 22 and
 24).
 
-Phase 2E (2026-10-20) added `tests/phase2e.test.mjs` (11 tests) to the same
+Phase 2E (2026-10-20) added `tests/phase2e.test.mjs` (12 tests) to the same
 command: agent adapters and their fail-closed paths, the agent recorded on the
 job and exposed by the API, pagination totals, id/goal search with 40-byte
 truncation, event retention and goal pruning, maintenance throttling, encrypted
 goals (ciphertext in the database, plaintext over an authenticated API), the
-wrong/missing-key markers, the <= 45-statement tick (D1 Free allows 50 per
-invocation) and an in-place migration of a Phase 2D database. The suite has no
+wrong/missing-key markers, plaintext dispatch plus the unreadable-goal refusal,
+the <= 45-statement tick (D1 Free allows 50 per invocation) and an in-place
+migration of a Phase 2D database. The suite has no
 network dependency except the loopback fake GitHub server.
 
 ### Cloud runs (public repo `naeishuu-collab/opencode-24-7`, GitHub-hosted runners)
@@ -159,6 +160,8 @@ Every real-model run used the free tier only (`--max-cost-usd 0` and
 | `agent-job` 39387682370 | one of those 9 jobs: the agent changed **only** `README.md` and its final text matched the goal, but `npm test` exited 1. The artifact's `verify.log` showed `tests/controller.test.mjs:493` expecting `unknown` and getting `failed` - a test that hardcoded `2026-10-19` had fallen outside the 24 h grace. Fixed in `37ad7a0`; the suite is green again on Windows, WSL and both CI platforms. |
 | `soak` 39737593336 -> 39738795097 | chained-slice smoke: five 2-minute slices, each dispatching the next one after saving its state; the last one logged `verdict=pending slices=5` and `chain stop`. The `soak` concurrency group serialized the handoffs and every slice restored the previous cache. |
 | `soak` 39739170179 -> 39894071084 | **the measured 24 h chain**: five 300-minute slices chained back-to-back (last slice created 2026-10-23T03:15:51Z), window `2026-10-22T07:14:58Z`..`2026-10-23T08:16:01Z` = **1501.1 min**, **coverage 99.94 %**, **3000/3000 samples**, 15 SIGKILL restarts, **5/5 real jobs succeeded**, all invariants green, $0 -> `verdict.soak_24h = verified`. |
+| `agent-job` 40173981494 | **first worker dispatch**: job `job-20261025T074212Z-0e06` created through the public API, dispatched by the Worker's `*/5` cron, run succeeded in 236 s, controller finalized it at 502 s with `{ok:true}`, one attempt/run id, $0, 1,336,748 tokens. The artifact showed the goal had been dispatched as `enc1.*`; **that bug is the point of this row** - fixed in `3a67099`. |
+| `agent-job` 40174618013 | **worker dispatch after the fix** (`3a67099`): job `job-20261025T075353Z-0d93` with goal marker `OC24-E2E-7F3A`; the run log shows the plaintext prompt, run succeeded in 401 s, controller `{ok:true}`, one attempt/run id, $0, 23,166 tokens, artifact diff contains the marker. Three extra ticks dispatched nothing; GitHub lists one run per job. |
 
 The Linux verification found a real bug: opencode resolves its project root from
 the `PWD` environment variable on POSIX, so a forwarded `PWD` made the agent
@@ -204,14 +207,14 @@ suite carries a regression test for it.
 - A load/soak test has **completed**: the 24 h chain measured 99.94 % uptime over
   1501 min (3000/3000 samples, 5/5 real jobs, $0, all invariants green), so
   `soak_24h` is `verified`. See `docs/PHASE2E.md`.
-- Phase 2E cloud gaps (see `docs/PHASE2E.md`): the Cloudflare worker, D1 binding
-  and cron are deployed and exercised; the remaining gap is a dispatch **from the
-  worker itself** (needs the fine-grained PAT). A cloud runner has not yet
-  reported back to the public controller (the advisory callback is wired but not
-  exercised at load).
+- Phase 2E cloud gaps (see `docs/PHASE2E.md`): the Cloudflare worker, D1, cron,
+  worker dispatch, independent artifact verification and the runner callback are
+  all measured (runs `40173981494`, `40174618013`). What is not measured is
+  sustained multi-job load at the free-plan edges.
 - Goal encryption is opt-in (`OC24_GOAL_KEY`); without the key goals are stored
   as plain text in SQLite/D1. Encrypted goals cannot be searched by text (ids
-  still match), and a lost key makes them unreadable by design.
+  still match), a lost key makes them unreadable by design, and the dispatched
+  prompt is still visible in the Actions log of a public repository.
 - Codex CLI / Claude Code / Gemini CLI are adapter declarations only; their free
   tier, authentication and terms have not been verified, so they fail closed at
   job creation.

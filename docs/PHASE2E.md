@@ -73,9 +73,9 @@ Live values:
 | D1 | `oc24-controller`, `49efd2f8-a70b-4814-8f15-ff4e1fb35b68`, APAC (KIX) |
 | cron | `*/5 * * * *` (Workers Cron Triggers, free plan) |
 | secrets | `OC24_ADMIN_TOKEN`, `OC24_GOAL_KEY` (both random, generated locally) |
-| `OC24_GITHUB_TOKEN` | **not set** - creating a least-privilege fine-grained PAT needs the account owner in the browser; until then the worker stores jobs but cannot dispatch |
+| `OC24_GITHUB_TOKEN` | fine-grained PAT registered 2026-10-25 (repository `naeishuu-collab/opencode-24-7`, Actions read/write; a side-effect-free probe confirmed Contents read-only). Stored only as a Worker secret. |
 
-Gotchas found during the deploy (all fixed in the code before the final deploy):
+Gotchas found during the deploy and the first live runs (all fixed):
 
 * The account had no `workers.dev` subdomain, so `wrangler deploy` refused to
   publish. It was registered once through the API (`naeishuu`); the dashboard
@@ -91,6 +91,12 @@ Gotchas found during the deploy (all fixed in the code before the final deploy):
   Cloudflare provisions the certificate; retry before assuming a network block.
 * `wrangler login` is an OAuth session with a ~1 h access token. Re-run it before
   a deploy; a long-lived `CLOUDFLARE_API_TOKEN` is the better long-term option.
+* **Real bug, caught by the first worker dispatch** (2026-10-25): with
+  `OC24_GOAL_KEY` set, the dispatcher passed the stored `enc1.*` goal as the
+  workflow prompt. The agent guessed the task from the ciphertext length and
+  still succeeded, which is exactly how a broken path hides. Fixed in `3a67099`:
+  decrypt before dispatch, and fail the job (no dispatch) when the goal cannot
+  be read.
 
 After deploying, `OC24_CONTROLLER_URL` is set to the workers.dev URL (runner
 reports are advisory only) and the worker is verified with:
@@ -99,6 +105,44 @@ reports are advisory only) and the worker is verified with:
 curl https://oc24-controller.naeishuu.workers.dev/healthz   # {"ok":true,...,"version":"2e"}
 ```
 
+## Cloud dispatch E2E (2026-10-25)
+
+The worker did the whole path by itself: authenticated API -> queued job ->
+`*/5` cron tick -> `workflow_dispatch` -> run polling -> artifact download ->
+independent contract check -> terminal state. Nothing ran locally during the
+jobs.
+
+* **Run 1** (pre-fix commit `1aa3fe0`): job `job-20261025T074212Z-0e06`,
+  created 07:42:12Z, dispatched by the cron at 07:45:24Z, run `40173981494`
+  (conclusion success, 236 s). The controller finalized it at 07:50:34Z
+  (**502 s end to end**): one attempt, one run id, **$0**, 1,336,748 tokens
+  (33 steps), artifact `oc24-job-40173981494`, verification `{ok:true}`, diff
+  touching only `README.md`.
+  It also **found the sealed-prompt bug**: the artifact's `finalText` and the
+  run log both showed the prompt arrived as `enc1.*`; the agent inferred the
+  task from the ciphertext length. Fixed in `3a67099`.
+* **Run 2** (after the fix, commit `3a67099`): job
+  `job-20261025T075353Z-0d93`, goal contained the unique marker
+  `OC24-E2E-7F3A`. The job log shows the **plaintext** prompt, run `40174618013`
+  succeeded (401 s), one attempt, **$0**, 23,166 tokens, artifact
+  `oc24-job-40174618013`; `diff.patch` contains the marker and the controller
+  recorded verification `{ok:true}`. An independent script re-checked the
+  artifact (schema, $0, allowlist, unchanged commit, `npm test` exit 0, only
+  `README.md`, no secret material): all pass.
+* **No duplicate dispatch**: three extra authenticated ticks after run 2
+  returned `dispatched: 0`; the job kept one attempt and one run id, and GitHub
+  lists exactly one `agent-job` run per job id.
+* **Callback**: the runner -> public worker advisory path is real, not just
+  wired: run 1 recorded five `attempt-report` events (heartbeat 07:49:42Z), run
+  2 two of them.
+* **Auth / secrets**: unauthenticated `GET /api/jobs` -> 401; a wrong admin
+  token -> 401 `bad-token`; artifacts scanned clean for PAT, admin token and
+  private keys; the PAT is only ever sent to `api.github.com` by the worker and
+  is not available to the runner, which uses its own `GITHUB_TOKEN`.
+* **Fail-closed**: a job created while the secret was still missing stayed
+  `queued` with 0 attempts and the tick reported
+  `no GitHub token configured; dispatch is disabled`; the probe job was then
+  cancelled. An unreadable sealed goal is refused by `3a67099` (unit test).
 
 ## Agent adapters
 
@@ -129,8 +173,10 @@ in `docs/FREE-MODELS.md` for this project.
 
 * Storage: `OC24_GOAL_KEY` derived with SHA-256 -> AES-256-GCM, random 12-byte IV
   per goal, ciphertext prefixed `enc1.`. The key is never written to D1/SQLite.
-* Read path: only an authenticated session gets plaintext (`GET /api/jobs`,
-  `GET /api/jobs/:id`); logs and artifacts never contain the goal.
+* Read path: authenticated sessions get plaintext, and the dispatcher decrypts
+  the goal for the workflow input. That prompt is therefore visible in the run's
+  log/UI on a public repository - encryption protects the database at rest, not
+  the dispatched job. Artifacts contain the goal only if the agent quotes it.
 * Loss of the key: goals become unreadable (`[encrypted: ...]`), everything else
   (state, runs, verification, costs) remains. There is no recovery by design.
 * Limitation: full-text search cannot see encrypted goals; search still matches
@@ -166,14 +212,14 @@ or after five 300-minute slices (finite test, not a production loop).
 
 Executed locally (Windows 11 / node 24.21 and WSL2 Ubuntu / node 22.22):
 
-* `node --test "tests/*.test.mjs"` — **87 tests, 84 pass, 0 fail, 3 skipped**
+* `node --test "tests/*.test.mjs"` — **88 tests, 85 pass, 0 fail, 3 skipped**
   (the skips are the real-model integration tests, run separately in the cloud).
-* Phase 2E suite (`tests/phase2e.test.mjs`, 11 tests): agent fail-closed and
+* Phase 2E suite (`tests/phase2e.test.mjs`, 12 tests): agent fail-closed and
   adapter limits, agent in the job/API, pagination totals, id/goal search and
   40-byte truncation, event retention and goal pruning, maintenance throttling,
   encrypted goals absent from the database and present over the API, wrong/missing
-  key markers, the **<= 45 statement tick**, and an in-place migration of a
-  Phase 2D database.
+  key markers, **plaintext dispatch plus the unreadable-goal refusal**, the
+  **<= 45 statement tick**, and an in-place migration of a Phase 2D database.
 * Soak smoke (1.2 min, 2 SIGKILL restarts, 3 s sampling): availability 100 %,
   all invariants green, verdict `pending` as designed.
 * Real-job soak (6 min, 1 real dispatch, no restarts): controller reachable for
@@ -203,8 +249,9 @@ Deployed and exercised in the real cloud (2026-10-19, free plan):
   written** - orders of magnitude inside the free limits.
 * Goal confidentiality in the live database: the stored column starts `enc1.`
   while the authenticated API returns the plaintext.
-* A job created through the cloud API persists as `queued`; dispatch is blocked
-  only by the missing `OC24_GITHUB_TOKEN` (see Known gaps).
+* A job created through the cloud API persists as `queued`. Before the PAT was
+  registered the tick refused to dispatch it (0 attempts, fail-closed); with the
+  secret in place the Cloud dispatch E2E section above is the live proof.
 * The first request after the deploy failed with `SQLITE_ERROR: incomplete
   input` because D1's `exec()` splits on newlines. Fixed, redeployed and
   re-verified; the D1 call-shape test now rejects multi-line `exec` input.
@@ -232,20 +279,21 @@ Deployed and exercised in the real cloud (2026-10-19, free plan):
 
 Not verified:
 
-* Cloud dispatch **from the worker** - `OC24_GITHUB_TOKEN` is not registered
-  (creating a fine-grained PAT needs the account owner in the browser). The
-  workflow token can dispatch: every soak slice created a real job with
-  `workflow_dispatch`, which is the event `GITHUB_TOKEN` may create.
-* Cloud runner -> public controller report at load (the advisory callback is
-  wired to the deployed URL but not exercised at scale).
-* Sustained load at the free-plan edges (many jobs/day, D1 row counts).
+* Sustained/multi-job load at the free-plan edges (many jobs/day, concurrent
+  dispatches, D1 row counts under a real queue). The caps have unit tests; two
+  real cloud jobs are not a load test.
+* The advisory callback was exercised by two jobs (2-5 reports each), not under
+  load or with a delay/retry storm.
 * Codex/Claude/Gemini adapters are declarations only.
 
 ## Known gaps
 
-* Cloud dispatch waits for the fine-grained PAT (`actions: write`,
-  `contents: read`, repository `naeishuu-collab/opencode-24-7`). The dashboard is
-  fully usable without it.
+* The dispatched goal is visible in the workflow log of this public repository
+  (encryption protects the database at rest, not the job input). Keep genuinely
+  sensitive text out of goals or run the workflow in a private repository.
+* `OC24_GITHUB_TOKEN` is a fine-grained PAT (Actions read/write, Contents
+  read-only, one repository) stored as a Worker secret. Rotate it at its expiry;
+  no code or artifact contains it.
 * `wrangler login` is an OAuth session that expires after ~1 h; prefer
   `CLOUDFLARE_API_TOKEN` for unattended deploys.
 * `compatibility_date = 2025-09-01` must be re-checked at deploy time.

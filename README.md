@@ -22,7 +22,13 @@ Workers + D1 + cron on the free plan, goals AES-GCM encrypted at rest). The
 **24 h soak is verified** by its own strict definition: a chained run (five
 300-minute slices, no scheduler in the path) measured **99.94 % uptime over
 1501 min**, 3000/3000 samples answered, 15 SIGKILL restarts, 5/5 real jobs
-succeeded, all invariants green, $0. See `docs/PHASE2E.md`.
+succeeded, all invariants green, $0. **Cloud dispatch is verified too**: the
+deployed Worker's cron dispatched real `agent-job` runs from jobs created
+through its API, the runner posted advisory heartbeats back to the public URL,
+and the controller downloaded and independently verified each artifact before
+`succeeded` (one attempt, no duplicate run, $0). The first live dispatch exposed
+a sealed-goal bug (the prompt arrived as `enc1.*`); fixed in `3a67099` and
+re-measured with a unique marker in the goal. See `docs/PHASE2E.md`.
 
 ## What runs today
 

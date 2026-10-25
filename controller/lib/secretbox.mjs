@@ -5,8 +5,9 @@
 // AES-256-GCM via WebCrypto, which exists unchanged in Node (>= 20) and in the
 // Workers runtime. The key is never written to the database: if it is lost the
 // goal text becomes unreadable (fail closed) while jobs, attempts, runs and
-// verification results stay intact. Goals are only decrypted for an
-// authenticated API response; logs and artifacts never contain them.
+// verification results stay intact. Goals are decrypted for an authenticated
+// API response and for the workflow input (so the prompt appears in the Actions
+// log of a public repository); the database never holds the plaintext.
 const PREFIX = "enc1.";
 const SEALED = /^enc1\.[A-Za-z0-9+/=]+\.[A-Za-z0-9+/=]+$/;
 const IV_BYTES = 12;
