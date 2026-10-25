@@ -1,8 +1,7 @@
 # Cloudflare Workers (free plan) deployment for the 24/7 controller.
 #
-# Not deployed yet: this repository has no Cloudflare account/credentials, so
-# the worker path is implemented and covered by the same tests as the local
-# server, but the real deployment is unverified (docs/PHASE2E.md).
+# Deployed 2026-10-19: https://oc24-controller.naeishuu.workers.dev
+# (Workers + D1 + cron on the free plan; docs/PHASE2E.md has the live values).
 #
 #   wrangler login
 #   wrangler d1 create oc24-controller         # then paste database_id below
